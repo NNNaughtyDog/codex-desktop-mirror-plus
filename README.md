@@ -87,6 +87,12 @@ Sync Windows Codex Desktop Mirror
 
 它会尝试从 Microsoft Store 源下载 Codex Windows MSIX，并发布类似这样的 Release：
 
+如果 GitHub Actions 的 Windows runner 因 Microsoft Store / Entra 授权限制无法直接下载，脚本会自动退回到上游 GitHub 镜像仓库抓取 MSIX，再发布到本仓库。默认 fallback 是：
+
+```text
+Wangnov/codex-app-mirror
+```
+
 ```text
 codex-windows-26.623.5546.0
 ```
@@ -109,7 +115,17 @@ release-manifest.json
 .\scripts\Publish-GitHubRelease.ps1 -DistDir .\dist -Repo "NNNaughtyDog/codex-desktop-mirror-plus"
 ```
 
-如果 GitHub Actions 上的 `winget download` 被限制，可以在自己的 Windows 电脑上手动运行上面的命令。
+如果你想指定自己的上游镜像：
+
+```powershell
+.\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist -FallbackRepo "owner/repo"
+```
+
+如果你只允许 Microsoft Store 官方源，不允许 fallback：
+
+```powershell
+.\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist -NoFallback
+```
 
 ## 下载地址在哪里
 
