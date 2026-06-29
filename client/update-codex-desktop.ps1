@@ -42,6 +42,17 @@ function Test-CodexInstallDir {
         (Test-Path -LiteralPath (Join-Path $Path 'AppxManifest.xml'))
 }
 
+function Test-EmptyOrMissingDirectory {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $true
+    }
+    if (-not (Get-Item -LiteralPath $Path).PSIsContainer) {
+        return $false
+    }
+    return -not [bool](Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
 function Resolve-CodexInstallDir {
     param([string] $DefaultPath)
 
@@ -65,10 +76,15 @@ function Resolve-CodexInstallDir {
     Write-Host ''
     Write-Host "Could not find Codex desktop at the default location: $DefaultPath"
     Write-Host 'Please enter the absolute path to the Codex install folder.'
+    Write-Host 'If Codex is not installed yet, enter an empty or new folder and the latest version will be installed there.'
     Write-Host 'Example: D:\software\Codex'
 
     while ($true) {
-        $inputPath = Read-RequiredInput -Prompt 'Codex install folder'
+        $inputPath = Read-Host "Codex install folder [$DefaultPath]"
+        if ([string]::IsNullOrWhiteSpace($inputPath)) {
+            $inputPath = $DefaultPath
+        }
+        $inputPath = $inputPath.Trim().Trim('"')
         if (-not [IO.Path]::IsPathRooted($inputPath)) {
             Write-Host 'Please enter an absolute path, for example D:\software\Codex.'
             continue
@@ -76,8 +92,12 @@ function Resolve-CodexInstallDir {
         if (Test-CodexInstallDir -Path $inputPath) {
             return (Get-FullPath $inputPath)
         }
+        if (Test-EmptyOrMissingDirectory -Path $inputPath) {
+            return (Get-FullPath $inputPath)
+        }
         Write-Host "That folder does not look like a Codex desktop install: $inputPath"
-        Write-Host 'It should contain app\Codex.exe and AppxManifest.xml.'
+        Write-Host 'For update, it should contain app\Codex.exe and AppxManifest.xml.'
+        Write-Host 'For first install, choose a new or empty folder.'
     }
 }
 
@@ -269,6 +289,7 @@ function Get-LatestReleaseAsset {
 $installFull = Resolve-CodexInstallDir -DefaultPath $InstallDir
 $installParent = Split-Path -Parent $installFull
 Assert-SafeDirectory -Path $installFull -ExpectedParent $installParent
+$isFreshInstall = -not (Test-CodexInstallDir -Path $installFull)
 
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'x64' }
 $workRoot = Join-Path $installParent 'Codex-updater-work'
@@ -283,7 +304,11 @@ New-Item -ItemType Directory -Force -Path $downloadDir, $extractDir | Out-Null
 
 $currentVersion = Get-AppxManifestVersion -Root $installFull
 Write-Step "Current install: $installFull"
-Write-Step "Current version: $currentVersion"
+if ($isFreshInstall) {
+    Write-Step 'Current version: not installed; first install mode enabled.'
+} else {
+    Write-Step "Current version: $currentVersion"
+}
 Write-Step "Detected architecture: $arch"
 
 $activeRepo = Normalize-GitHubRepo -Value $Repo
@@ -365,11 +390,17 @@ if ($currentVersion -eq $newVersion) {
     return
 }
 
-Wait-ForCodexToClose -TargetDir $installFull
+if (-not $isFreshInstall) {
+    Wait-ForCodexToClose -TargetDir $installFull
+}
 
-$oldPackageFiles = Get-AppxBlockMapFiles -Root $installFull
 $customRelativeFiles = @()
-if ($oldPackageFiles.Count -gt 0) {
+$oldPackageFiles = if ($isFreshInstall) {
+    [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+} else {
+    Get-AppxBlockMapFiles -Root $installFull
+}
+if (-not $isFreshInstall -and $oldPackageFiles.Count -gt 0) {
     $customRelativeFiles = @(Get-ChildItem -LiteralPath $installFull -Recurse -Force -File -ErrorAction SilentlyContinue | Where-Object {
         $rel = $_.FullName.Substring($installFull.Length).TrimStart('\')
         -not $oldPackageFiles.Contains($rel)
@@ -381,11 +412,17 @@ Write-Step "Custom install-dir files to preserve: $($customRelativeFiles.Count)"
 
 $replaceSucceeded = $false
 try {
-    Write-Step "Moving old install to backup: $backupDir"
-    Move-Item -LiteralPath $installFull -Destination $backupDir
+    if ($isFreshInstall) {
+        Write-Step "Installing Codex into: $installFull"
+        New-Item -ItemType Directory -Force -Path $installFull | Out-Null
+    } else {
+        Write-Step "Moving old install to backup: $backupDir"
+        Move-Item -LiteralPath $installFull -Destination $backupDir
+        Write-Step 'Copying new package into install directory.'
+        New-Item -ItemType Directory -Force -Path $installFull | Out-Null
+    }
 
-    Write-Step 'Copying new package into install directory.'
-    New-Item -ItemType Directory -Force -Path $installFull | Out-Null
+    Write-Step 'Copying package files.'
     Invoke-RobocopyMirror -Source $extractDir -Destination $installFull
 
     foreach ($rel in $customRelativeFiles) {
@@ -405,15 +442,25 @@ try {
         throw 'Post-update Codex.exe check failed.'
     }
 
+    $runBat = Join-Path $installFull '运行Codex.bat'
+    if (-not (Test-Path -LiteralPath $runBat)) {
+        "@echo off`r`ncd /d ""%~dp0app""`r`nstart """" ""%~dp0app\Codex.exe""`r`n" |
+            Set-Content -LiteralPath $runBat -Encoding ascii
+    }
+
     $replaceSucceeded = $true
-    Write-Step "Updated successfully to $installedVersion."
+    if ($isFreshInstall) {
+        Write-Step "Installed successfully: $installedVersion."
+    } else {
+        Write-Step "Updated successfully to $installedVersion."
+    }
 } catch {
     Write-Step "Update failed: $($_.Exception.Message)"
-    Write-Step 'Attempting rollback.'
     if (Test-Path -LiteralPath $installFull) {
         Remove-TreeRobust -Path $installFull
     }
-    if (Test-Path -LiteralPath $backupDir) {
+    if (-not $isFreshInstall -and (Test-Path -LiteralPath $backupDir)) {
+        Write-Step 'Attempting rollback.'
         Move-Item -LiteralPath $backupDir -Destination $installFull
     }
     throw

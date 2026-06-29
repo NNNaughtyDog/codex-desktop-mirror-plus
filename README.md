@@ -8,22 +8,23 @@
 
 ## 普通用户怎么用
 
-如果你只是想更新本机的 Codex 桌面版，下载这两个文件，放在同一个文件夹里：
+如果你只是想安装或更新本机的 Codex 桌面版，下载这两个文件，放在同一个文件夹里：
 
 - [run-update-codex-desktop.cmd](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/run-update-codex-desktop.cmd)
 - [update-codex-desktop.ps1](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/update-codex-desktop.ps1)
 
 然后：
 
-1. 关闭所有 Codex 窗口。
+1. 如果已经安装过 Codex，先关闭所有 Codex 窗口。
 2. 双击 `run-update-codex-desktop.cmd`。
-3. 如果脚本找不到 Codex，会提示你输入安装目录的绝对路径，例如：
+3. 如果脚本找不到 Codex，会提示你输入安装目录的绝对路径。
+4. 如果你没有安装过 Codex，就输入一个新的或空的文件夹，例如：
 
 ```text
 D:\software\Codex
 ```
 
-4. 如果默认镜像仓库失效，会提示你输入新的 GitHub 镜像仓库，例如：
+5. 如果默认镜像仓库失效，会提示你输入新的 GitHub 镜像仓库，例如：
 
 ```text
 owner/repo
@@ -38,6 +39,8 @@ D:\software\Codex
 
 如果你的 Codex 不在这里，脚本会主动询问，不会瞎删目录。
 
+如果目标目录不存在或是空目录，脚本会进入首次安装模式：下载最新版 MSIX、校验 SHA256、解包到该目录，并创建 `运行Codex.bat`。
+
 ## 脚本会保护什么
 
 用户端更新脚本会做这些检查：
@@ -47,6 +50,7 @@ D:\software\Codex
 - 下载后做 SHA256 校验。
 - 解包后确认包名是 `OpenAI.Codex`。
 - 覆盖前临时备份旧安装目录。
+- 没安装过时支持直接安装到新的/空的自定义目录。
 - 成功验证后删除临时文件和备份，不留几 GB 垃圾。
 - 失败时尝试回滚旧版本。
 - 保留安装目录里不属于官方 MSIX 包的自定义文件，例如你自己放的 `.bat`。
