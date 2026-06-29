@@ -1,0 +1,29 @@
+name: Sync Windows Codex Desktop Mirror
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync Windows package
+        shell: pwsh
+        run: |
+          ./scripts/Sync-CodexWindowsMirror.ps1 -OutDir ./dist
+
+      - name: Publish release
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/Publish-GitHubRelease.ps1 -DistDir ./dist -Repo "${{ github.repository }}"
