@@ -1,7 +1,9 @@
 param(
     [string] $OutDir = '.\dist',
     [string] $PackageId = '9PLM9XGG6VKS',
-    [string] $Source = 'msstore'
+    [string] $Source = 'msstore',
+    [string] $FallbackRepo = 'Wangnov/codex-app-mirror',
+    [switch] $NoFallback
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,13 +73,90 @@ function Invoke-WingetDownload {
     }
 }
 
+function Get-GitHubRelease {
+    param([string] $RepoName)
+    $uri = "https://api.github.com/repos/$RepoName/releases/latest"
+    return Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'codex-desktop-mirror-plus' }
+}
+
+function Get-ReleaseChecksumMap {
+    param($Release)
+    $map = @{}
+    $sumAsset = $Release.assets | Where-Object { $_.name -eq 'SHA256SUMS-windows.txt' } | Select-Object -First 1
+    if (-not $sumAsset) {
+        return $map
+    }
+
+    try {
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri $sumAsset.browser_download_url
+        $content = if ($resp.Content -is [byte[]]) {
+            [Text.Encoding]::UTF8.GetString($resp.Content)
+        } else {
+            [string]$resp.Content
+        }
+        foreach ($line in ($content -split "`r?`n")) {
+            if ($line -match '^([a-fA-F0-9]{64})\s+(.+)$') {
+                $map[$matches[2].Trim()] = $matches[1].ToLowerInvariant()
+            }
+        }
+    } catch {
+        Write-Step "Could not read fallback checksum file: $($_.Exception.Message)"
+    }
+    return $map
+}
+
+function Invoke-GitHubFallbackDownload {
+    param(
+        [string] $RepoName,
+        [string] $TargetDir
+    )
+
+    Write-Step "Falling back to GitHub mirror repo: $RepoName"
+    $release = Get-GitHubRelease -RepoName $RepoName
+    $checksumMap = Get-ReleaseChecksumMap -Release $release
+    $assets = @($release.assets | Where-Object { $_.name -match '^OpenAI\.Codex_.*_(x64|arm64)__.*\.Msix$' })
+    if ($assets.Count -eq 0) {
+        throw "Fallback repo $RepoName does not expose Windows OpenAI.Codex MSIX assets on its latest release."
+    }
+
+    foreach ($asset in $assets) {
+        $dest = Join-Path $TargetDir $asset.name
+        Write-Step "Downloading fallback asset: $($asset.name)"
+        & curl.exe -L --fail --retry 5 --retry-delay 2 --output $dest $asset.browser_download_url
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl failed for $($asset.name) with exit code $LASTEXITCODE"
+        }
+
+        $actual = Get-Sha256 -Path $dest
+        $expected = $null
+        if ($asset.PSObject.Properties.Name -contains 'digest' -and $asset.digest) {
+            $expected = ([string]$asset.digest) -replace '^sha256:', ''
+        }
+        if (-not $expected -and $checksumMap.ContainsKey($asset.name)) {
+            $expected = $checksumMap[$asset.name]
+        }
+        if ($expected -and $actual -ne $expected.ToLowerInvariant()) {
+            throw "SHA256 mismatch for $($asset.name). Expected $expected, got $actual"
+        }
+        Write-Step "Verified fallback asset: $($asset.name)"
+    }
+}
+
 $outFull = [IO.Path]::GetFullPath($OutDir)
 $downloadDir = Join-Path $outFull 'download'
 $assetsDir = Join-Path $outFull 'assets'
 Remove-Item -LiteralPath $outFull -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $downloadDir, $assetsDir | Out-Null
 
-Invoke-WingetDownload -Id $PackageId -StoreSource $Source -TargetDir $downloadDir
+try {
+    Invoke-WingetDownload -Id $PackageId -StoreSource $Source -TargetDir $downloadDir
+} catch {
+    if ($NoFallback) {
+        throw
+    }
+    Write-Step "winget download failed: $($_.Exception.Message)"
+    Invoke-GitHubFallbackDownload -RepoName $FallbackRepo -TargetDir $downloadDir
+}
 
 $msixFiles = @(Get-ChildItem -LiteralPath $downloadDir -Recurse -File -Include '*.msix','*.appx' |
     Where-Object { $_.Name -match 'Codex|OpenAI' -or $_.FullName -match 'Codex|OpenAI' })
