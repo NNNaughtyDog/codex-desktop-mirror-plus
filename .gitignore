@@ -1,0 +1,10 @@
+dist/
+tmp/
+*.log
+*.tmp
+*.msix
+*.appx
+*.zip
+*.7z
+.DS_Store
+Thumbs.db
