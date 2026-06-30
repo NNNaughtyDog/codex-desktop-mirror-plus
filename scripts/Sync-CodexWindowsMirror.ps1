@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# The workflow first tries Microsoft Store, then falls back to a GitHub mirror.
 function Write-Step {
     param([string] $Message)
     Write-Host "[mirror-sync] $Message"
