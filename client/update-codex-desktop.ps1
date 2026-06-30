@@ -144,8 +144,14 @@ function Remove-TreeRobust {
             throw "robocopy cleanup failed for $Path with exit code $code"
         }
         Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $Path) {
+            cmd.exe /c rmdir /s /q "$Path" 2>$null
+        }
     } finally {
         Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $empty) {
+            cmd.exe /c rmdir /s /q "$empty" 2>$null
+        }
     }
 }
 
