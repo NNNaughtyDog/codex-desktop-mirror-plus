@@ -211,16 +211,56 @@ function Invoke-RobocopyMirror {
     }
 }
 
+function Get-CurlProxyArgs {
+    $candidates = @()
+
+    foreach ($name in @('HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $candidates += $value.Trim()
+        }
+    }
+
+    foreach ($key in @('https.proxy', 'http.proxy')) {
+        try {
+            $value = (& git config --global --get $key 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $candidates += $value.Trim()
+            }
+        } catch {
+        }
+    }
+
+    try {
+        $local7890 = Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 7890 -State Listen -ErrorAction SilentlyContinue
+        if ($local7890) {
+            $candidates += 'http://127.0.0.1:7890'
+        }
+    } catch {
+    }
+
+    $proxy = $candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique -First 1
+    if ($proxy) {
+        return @('--proxy', $proxy)
+    }
+    return @()
+}
+
 function Download-FileWithFallback {
     param(
         [string[]] $Urls,
         [string] $OutputPath
     )
 
+    $proxyArgs = @(Get-CurlProxyArgs)
+    if ($proxyArgs.Count -gt 0) {
+        Write-Step "Using curl proxy: $($proxyArgs[1])"
+    }
+
     foreach ($url in $Urls) {
         Write-Step "Downloading: $url"
         try {
-            & curl.exe -L --fail --retry 5 --retry-delay 2 --continue-at - --output $OutputPath $url
+            & curl.exe @proxyArgs -L --fail --retry 5 --retry-delay 2 --connect-timeout 30 --continue-at - --output $OutputPath $url
             if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutputPath)) {
                 return $url
             }
