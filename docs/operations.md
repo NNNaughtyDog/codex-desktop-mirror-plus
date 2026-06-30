@@ -31,19 +31,28 @@ Then publish:
 
 ## User Updater
 
-Give users both files from `client/`:
+Give users the release asset:
+
+```text
+CodexDesktopUpdater.zip
+```
+
+It is generated automatically from `client/` during `Sync-CodexWindowsMirror.ps1` and uploaded by `Publish-GitHubRelease.ps1`.
+
+Users should extract the zip and double-click `run-update-codex-desktop.cmd`.
+
+If you need a fallback, give users both files from `client/` and tell them to keep the files together:
 
 ```text
 update-codex-desktop.ps1
 run-update-codex-desktop.cmd
 ```
 
-They should keep the files together and double-click the `.cmd`.
-
 The updater:
 
 - finds `D:\software\Codex` by default;
 - prompts for an absolute path if Codex is elsewhere;
+- asks Windows for administrator permission if the install folder is protected;
 - prompts for a new GitHub mirror repo if the default disappears;
 - verifies SHA256 before updating;
 - keeps custom install-directory files that are not part of the old MSIX package;
