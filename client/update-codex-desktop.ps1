@@ -14,6 +14,91 @@ function Write-Step {
     Write-Host "[Codex updater] $Message"
 }
 
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Quote-ProcessArgument {
+    param([string] $Value)
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Test-DirectoryWritable {
+    param([string] $Path)
+
+    try {
+        $target = Get-FullPath $Path
+        while (-not (Test-Path -LiteralPath $target)) {
+            $parent = Split-Path -Parent $target
+            if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $target) {
+                return $false
+            }
+            $target = $parent
+        }
+        if (-not (Get-Item -LiteralPath $target).PSIsContainer) {
+            $target = Split-Path -Parent $target
+        }
+
+        $probe = Join-Path $target ('codex-updater-write-test-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        [IO.File]::WriteAllText($probe, 'test')
+        Remove-Item -LiteralPath $probe -Force
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-InstallTargetWritable {
+    param([string] $InstallPath)
+
+    $installFull = Get-FullPath $InstallPath
+    $installParent = Split-Path -Parent $installFull
+    if (-not (Test-DirectoryWritable -Path $installParent)) {
+        return $false
+    }
+    if ((Test-Path -LiteralPath $installFull) -and -not (Test-DirectoryWritable -Path $installFull)) {
+        return $false
+    }
+    return $true
+}
+
+function Restart-AsAdministrator {
+    param([string] $ResolvedInstallDir)
+
+    if (-not $PSCommandPath) {
+        throw 'Administrator permission is required, but this script is not running from a file path.'
+    }
+
+    Write-Step "Administrator permission is required to update this install folder: $ResolvedInstallDir"
+    Write-Step 'Windows will ask for permission, then the updater will continue in a new window.'
+
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', (Quote-ProcessArgument $PSCommandPath),
+        '-InstallDir', (Quote-ProcessArgument $ResolvedInstallDir),
+        '-Repo', (Quote-ProcessArgument $Repo)
+    )
+    if ($NoLaunch) {
+        $arguments += '-NoLaunch'
+    }
+    if ($KeepBackup) {
+        $arguments += '-KeepBackup'
+    }
+    if ($RemoveRegisteredAppx) {
+        $arguments += '-RemoveRegisteredAppx'
+    }
+
+    try {
+        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList ($arguments -join ' ') -Verb RunAs -Wait -PassThru
+        exit $process.ExitCode
+    } catch {
+        throw "Could not start the updater as administrator. $($_.Exception.Message)"
+    }
+}
+
 function Read-RequiredInput {
     param([string] $Prompt)
     while ($true) {
@@ -337,15 +422,26 @@ $installParent = Split-Path -Parent $installFull
 Assert-SafeDirectory -Path $installFull -ExpectedParent $installParent
 $isFreshInstall = -not (Test-CodexInstallDir -Path $installFull)
 
+if (-not (Test-InstallTargetWritable -InstallPath $installFull)) {
+    if (-not (Test-IsAdministrator)) {
+        Restart-AsAdministrator -ResolvedInstallDir $installFull
+    }
+    Write-Step "Running as administrator for protected install folder: $installFull"
+}
+
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'x64' }
-$workRoot = Join-Path $installParent 'Codex-updater-work'
 $runId = Get-Date -Format 'yyyyMMdd-HHmmss'
+$tempRoot = Get-FullPath ([IO.Path]::GetTempPath())
+$workRoot = Join-Path $tempRoot 'CodexDesktopUpdater'
 $runDir = Join-Path $workRoot $runId
 $downloadDir = Join-Path $runDir 'download'
 $extractDir = Join-Path $runDir 'extract'
-$backupDir = Join-Path $runDir 'backup-old-codex'
+$backupRoot = Join-Path $installParent 'Codex-updater-backup'
+$backupDir = Join-Path $backupRoot $runId
 
-Assert-SafeDirectory -Path $workRoot -ExpectedParent $installParent
+Assert-SafeDirectory -Path $workRoot -ExpectedParent $tempRoot
+Assert-SafeDirectory -Path $runDir -ExpectedParent $workRoot
+Assert-SafeDirectory -Path $backupRoot -ExpectedParent $installParent
 New-Item -ItemType Directory -Force -Path $downloadDir, $extractDir | Out-Null
 
 $currentVersion = Get-AppxManifestVersion -Root $installFull
@@ -386,7 +482,7 @@ if ($releaseInfo.AssetName -match '^OpenAI\.Codex_([0-9.]+)_') {
 }
 if ($assetPackageVersion -and $currentVersion -eq $assetPackageVersion) {
     Write-Step "Already on the latest package version ($currentVersion). No download needed."
-    Remove-TreeRobust -Path $workRoot
+    Remove-TreeRobust -Path $runDir
     return
 }
 
@@ -432,7 +528,7 @@ if ([string]$newManifest.Package.Identity.ProcessorArchitecture -ne $arch) {
 Write-Step "New package version: $newVersion"
 if ($currentVersion -eq $newVersion) {
     Write-Step 'Already on the latest package version. Cleaning temporary files.'
-    Remove-TreeRobust -Path $workRoot
+    Remove-TreeRobust -Path $runDir
     return
 }
 
@@ -463,6 +559,7 @@ try {
         New-Item -ItemType Directory -Force -Path $installFull | Out-Null
     } else {
         Write-Step "Moving old install to backup: $backupDir"
+        New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
         Move-Item -LiteralPath $installFull -Destination $backupDir
         Write-Step 'Copying new package into install directory.'
         New-Item -ItemType Directory -Force -Path $installFull | Out-Null
@@ -514,6 +611,7 @@ try {
     if ($replaceSucceeded -and -not $KeepBackup -and (Test-Path -LiteralPath $backupDir)) {
         Write-Step 'Removing backup after successful verification.'
         Remove-TreeRobust -Path $backupDir
+        Remove-Item -LiteralPath $backupRoot -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -526,7 +624,8 @@ if ($RemoveRegisteredAppx) {
 }
 
 Write-Step 'Cleaning updater work directory.'
-Remove-TreeRobust -Path $workRoot
+Remove-TreeRobust -Path $runDir
+Remove-Item -LiteralPath $workRoot -Force -ErrorAction SilentlyContinue
 
 if (-not $NoLaunch) {
     Write-Step 'Launching Codex from the updated install directory.'
