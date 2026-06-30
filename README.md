@@ -8,28 +8,31 @@
 
 ## 普通用户怎么用
 
-如果你只是想安装或更新本机的 Codex 桌面版，下载这两个文件，放在同一个文件夹里：
+如果你只是想安装或更新本机的 Codex 桌面版，用下面这个压缩包，不要分别保存 raw 文件：
 
-- [run-update-codex-desktop.cmd](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/run-update-codex-desktop.cmd)
-- [update-codex-desktop.ps1](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/update-codex-desktop.ps1)
+- [下载 CodexDesktopUpdater.zip](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/releases/latest/download/CodexDesktopUpdater.zip)
 
 然后：
 
 1. 如果已经安装过 Codex，先关闭所有 Codex 窗口。
-2. 双击 `run-update-codex-desktop.cmd`。
-3. 如果脚本找不到 Codex，会提示你输入安装目录的绝对路径。
-4. 如果你没有安装过 Codex，就输入一个新的或空的文件夹，例如：
+2. 解压 `CodexDesktopUpdater.zip`。
+3. 双击解压出来的 `run-update-codex-desktop.cmd`。
+4. 如果 Windows 提示“可能有风险”，确认文件来自本仓库后选择“保留”或“仍要运行”。
+5. 如果脚本找不到 Codex，会提示你输入安装目录的绝对路径。
+6. 如果你没有安装过 Codex，就输入一个新的或空的文件夹，例如：
 
 ```text
 D:\software\Codex
 ```
 
-5. 如果默认镜像仓库失效，会提示你输入新的 GitHub 镜像仓库，例如：
+如果默认镜像仓库失效，会提示你输入新的 GitHub 镜像仓库，例如：
 
 ```text
 owner/repo
 https://github.com/owner/repo
 ```
+
+如果 Codex 安装在 `C:\Program Files` 等受保护目录，脚本会自动请求管理员权限。
 
 脚本默认更新位置是：
 
@@ -108,6 +111,7 @@ OpenAI.Codex_..._x64__....Msix
 OpenAI.Codex_..._arm64__....Msix
 SHA256SUMS-windows.txt
 release-manifest.json
+CodexDesktopUpdater.zip
 ```
 
 ### 手动镜像
@@ -135,9 +139,13 @@ release-manifest.json
 
 当前有两类下载：
 
-### 1. 用户更新脚本
+### 1. 用户更新器
 
-直接下载：
+推荐下载一个压缩包：
+
+- [CodexDesktopUpdater.zip](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/releases/latest/download/CodexDesktopUpdater.zip)
+
+备用直链：
 
 - [run-update-codex-desktop.cmd](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/run-update-codex-desktop.cmd)
 - [update-codex-desktop.ps1](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/update-codex-desktop.ps1)
