@@ -20,6 +20,43 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function New-ClientUpdaterPackage {
+    param([string] $TargetDir)
+
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $clientDir = Join-Path $repoRoot 'client'
+    $staging = Join-Path ([IO.Path]::GetTempPath()) ('codex-client-updater-' + [guid]::NewGuid().ToString('N'))
+    $zipPath = Join-Path $TargetDir 'CodexDesktopUpdater.zip'
+
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    try {
+        Copy-Item -LiteralPath (Join-Path $clientDir 'run-update-codex-desktop.cmd') -Destination $staging -Force
+        Copy-Item -LiteralPath (Join-Path $clientDir 'update-codex-desktop.ps1') -Destination $staging -Force
+
+        @"
+Codex Desktop Updater
+
+中文说明：
+1. 先关闭所有 Codex 窗口。
+2. 双击 run-update-codex-desktop.cmd。
+3. 如果 Windows 提示安全风险，确认这是从你的 GitHub 仓库下载后，选择保留/仍要运行。
+4. 如果 Codex 安装在 C:\Program Files 等受保护目录，脚本会自动请求管理员权限。
+
+English:
+1. Close all Codex windows.
+2. Double-click run-update-codex-desktop.cmd.
+3. If Windows warns about the script, keep/run it only when it came from your trusted GitHub repository.
+4. If Codex is installed under a protected folder such as C:\Program Files, the updater will request administrator permission.
+"@ | Set-Content -LiteralPath (Join-Path $staging 'README.txt') -Encoding utf8
+
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -Force
+        Write-Step "Prepared user updater package: $zipPath"
+    } finally {
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Read-PackageManifest {
     param([string] $MsixPath)
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('codex-msix-' + [guid]::NewGuid().ToString('N'))
@@ -232,6 +269,8 @@ $manifestObject = [ordered]@{
 $manifestPath = Join-Path $assetsDir 'release-manifest.json'
 $manifestObject | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
+New-ClientUpdaterPackage -TargetDir $assetsDir
+
 $releaseNotesPath = Join-Path $outFull 'RELEASE_NOTES.md'
 @"
 # Codex Windows Desktop $releaseVersion
@@ -241,6 +280,8 @@ This release mirrors the Windows desktop MSIX package for OpenAI Codex.
 ## Assets
 
 $($items | Sort-Object architecture | ForEach-Object { "- $($_.architecture): ``$($_.file)`` ($([math]::Round($_.size / 1MB, 1)) MB)" } | Out-String)
+- updater: ``CodexDesktopUpdater.zip``
+
 ## Verification
 
 Use ``SHA256SUMS-windows.txt`` to verify downloaded files.
