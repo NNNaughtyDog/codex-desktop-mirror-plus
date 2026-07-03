@@ -1,0 +1,58 @@
+name: Publish Codex Desktop Updater
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - client/**
+      - README.md
+      - .github/workflows/publish-updater.yml
+
+permissions:
+  contents: write
+
+jobs:
+  publish-updater:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package updater
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD 'dist-updater'
+          $stage = Join-Path $PWD 'stage-updater'
+          New-Item -ItemType Directory -Force -Path $dist, $stage | Out-Null
+          Copy-Item -LiteralPath 'client/run-update-codex-desktop.cmd' -Destination $stage -Force
+          Copy-Item -LiteralPath 'client/update-codex-desktop.ps1' -Destination $stage -Force
+          @'
+          Codex Desktop Updater
+
+          1. Close all Codex windows.
+          2. Double-click run-update-codex-desktop.cmd.
+          3. If Windows warns about the script, keep/run it only when it came from your trusted GitHub repository.
+          4. If Codex is installed under a protected folder such as C:\Program Files, the updater will request administrator permission.
+          5. The updater checks required tools. If Git is missing, it asks whether to install it with winget; declining still allows the update, but Git proxy auto-detection is skipped.
+          '@ | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
+          $zip = Join-Path $dist 'CodexDesktopUpdater.zip'
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  CodexDesktopUpdater.zip" | Set-Content -LiteralPath (Join-Path $dist 'SHA256SUMS-updater.txt') -Encoding ascii
+
+      - name: Upload updater to latest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseJson = gh release list --limit 1 --json tagName --jq '.[0].tagName'
+          $tag = [string]$releaseJson
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = 'updater-v1.0.0'
+            gh release create $tag --title 'Codex Desktop Updater' --notes 'Standalone updater package.'
+          }
+          gh release upload $tag dist-updater/CodexDesktopUpdater.zip dist-updater/SHA256SUMS-updater.txt --clobber
