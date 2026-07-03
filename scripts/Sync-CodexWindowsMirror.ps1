@@ -41,12 +41,14 @@ Codex Desktop Updater
 2. 双击 run-update-codex-desktop.cmd。
 3. 如果 Windows 提示安全风险，确认这是从你的 GitHub 仓库下载后，选择保留/仍要运行。
 4. 如果 Codex 安装在 C:\Program Files 等受保护目录，脚本会自动请求管理员权限。
+5. 脚本会检查必要组件。没有 Git 时会询问是否通过 winget 安装；拒绝也能继续更新，只是不会自动读取 Git 代理配置。
 
 English:
 1. Close all Codex windows.
 2. Double-click run-update-codex-desktop.cmd.
 3. If Windows warns about the script, keep/run it only when it came from your trusted GitHub repository.
 4. If Codex is installed under a protected folder such as C:\Program Files, the updater will request administrator permission.
+5. The updater checks required tools. If Git is missing, it asks whether to install it with winget; declining still allows the update, but Git proxy auto-detection is skipped.
 "@ | Set-Content -LiteralPath (Join-Path $staging 'README.txt') -Encoding utf8
 
         Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue

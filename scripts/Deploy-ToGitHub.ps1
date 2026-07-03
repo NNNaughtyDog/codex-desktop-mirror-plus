@@ -3,7 +3,8 @@ param(
     [string] $Owner = '',
     [ValidateSet('public', 'private')]
     [string] $Visibility = 'public',
-    [string] $GitHubCliPath = ''
+    [string] $GitHubCliPath = '',
+    [switch] $InstallMissingDependencies
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,16 +14,78 @@ function Write-Step {
     Write-Host "[deploy] $Message"
 }
 
-function Get-GhPath {
-    param([string] $PreferredPath)
+function Read-YesNo {
+    param(
+        [string] $Prompt,
+        [bool] $DefaultYes = $false
+    )
+
+    $suffix = if ($DefaultYes) { ' [Y/n]' } else { ' [y/N]' }
+    while ($true) {
+        $answer = Read-Host ($Prompt + $suffix)
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $DefaultYes
+        }
+        switch -Regex ($answer.Trim()) {
+            '^(y|yes)$' { return $true }
+            '^(n|no)$' { return $false }
+            default { Write-Host 'Please answer y or n.' }
+        }
+    }
+}
+
+function Invoke-WingetInstall {
+    param(
+        [string] $PackageId,
+        [string] $DisplayName
+    )
+
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        throw "$DisplayName is required, but winget.exe was not found. Install it manually and re-run this script."
+    }
+
+    Write-Step "Installing $DisplayName with winget."
+    & winget.exe install --id $PackageId -e --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        throw "winget could not install $DisplayName. Exit code: $LASTEXITCODE"
+    }
+}
+
+function Ensure-Command {
+    param(
+        [string] $CommandName,
+        [string] $DisplayName,
+        [string] $WingetPackageId,
+        [string] $ManualUrl,
+        [string] $PreferredPath = ''
+    )
+
     if ($PreferredPath -and (Test-Path -LiteralPath $PreferredPath)) {
         return (Resolve-Path -LiteralPath $PreferredPath).Path
     }
-    $cmd = Get-Command gh.exe -ErrorAction SilentlyContinue
+
+    $cmd = Get-Command $CommandName -ErrorAction SilentlyContinue
     if ($cmd) {
         return $cmd.Source
     }
-    throw 'GitHub CLI gh.exe was not found. Install it from https://cli.github.com/ and re-run this script.'
+
+    Write-Step "$DisplayName was not found."
+    Write-Host "Manual install: $ManualUrl"
+    $install = $InstallMissingDependencies
+    if (-not $install) {
+        $install = Read-YesNo -Prompt "Install $DisplayName now with winget?"
+    }
+
+    if (-not $install) {
+        throw "$DisplayName is required. Install it and re-run this script."
+    }
+
+    Invoke-WingetInstall -PackageId $WingetPackageId -DisplayName $DisplayName
+    $cmd = Get-Command $CommandName -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        throw "$DisplayName was installed, but it is not visible in this PowerShell session. Open a new PowerShell window and re-run this script."
+    }
+    return $cmd.Source
 }
 
 function Invoke-Gh {
@@ -42,7 +105,10 @@ function Invoke-Gh {
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')
 Set-Location -LiteralPath $repoRoot
 
-$gh = Get-GhPath -PreferredPath $GitHubCliPath
+$git = Ensure-Command -CommandName 'git.exe' -DisplayName 'Git for Windows' -WingetPackageId 'Git.Git' -ManualUrl 'https://git-scm.com/download/win'
+Write-Step "Using Git: $git"
+
+$gh = Ensure-Command -CommandName 'gh.exe' -DisplayName 'GitHub CLI' -WingetPackageId 'GitHub.cli' -ManualUrl 'https://cli.github.com/' -PreferredPath $GitHubCliPath
 Write-Step "Using GitHub CLI: $gh"
 
 Write-Step 'Checking GitHub authentication.'

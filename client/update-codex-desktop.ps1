@@ -4,7 +4,8 @@ param(
     [switch] $NoLaunch,
     [switch] $KeepBackup,
     [switch] $RemoveRegisteredAppx,
-    [switch] $PreserveExtraInstallFiles
+    [switch] $PreserveExtraInstallFiles,
+    [switch] $InstallMissingDependencies
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,6 +14,80 @@ $ProgressPreference = 'SilentlyContinue'
 function Write-Step {
     param([string] $Message)
     Write-Host "[Codex updater] $Message"
+}
+
+function Read-YesNo {
+    param(
+        [string] $Prompt,
+        [bool] $DefaultYes = $false
+    )
+
+    $suffix = if ($DefaultYes) { ' [Y/n]' } else { ' [y/N]' }
+    while ($true) {
+        $answer = Read-Host ($Prompt + $suffix)
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $DefaultYes
+        }
+        switch -Regex ($answer.Trim()) {
+            '^(y|yes)$' { return $true }
+            '^(n|no)$' { return $false }
+            default { Write-Host 'Please answer y or n.' }
+        }
+    }
+}
+
+function Invoke-WingetInstall {
+    param(
+        [string] $PackageId,
+        [string] $DisplayName
+    )
+
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        Write-Step "winget.exe was not found. Please install $DisplayName manually, then run this updater again if you need it."
+        return $false
+    }
+
+    Write-Step "Installing $DisplayName with winget."
+    & winget.exe install --id $PackageId -e --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step "winget could not install $DisplayName. Exit code: $LASTEXITCODE"
+        return $false
+    }
+
+    return $true
+}
+
+function Ensure-UpdaterDependencies {
+    $required = @('curl.exe', 'tar.exe', 'robocopy.exe')
+    $missingRequired = @(
+        foreach ($command in $required) {
+            if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+                $command
+            }
+        }
+    )
+
+    if ($missingRequired.Count -gt 0) {
+        throw "Missing required Windows tools: $($missingRequired -join ', '). Please run this updater on Windows 10/11 with built-in curl, tar, and robocopy available."
+    }
+
+    if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+        Write-Step 'Optional dependency Git was not found. The updater can continue, but it cannot read Git proxy settings automatically.'
+        $installGit = $InstallMissingDependencies
+        if (-not $installGit) {
+            $installGit = Read-YesNo -Prompt 'Install Git for Windows now with winget?'
+        }
+        if ($installGit) {
+            [void](Invoke-WingetInstall -PackageId 'Git.Git' -DisplayName 'Git for Windows')
+            if (Get-Command git.exe -ErrorAction SilentlyContinue) {
+                Write-Step 'Git is available.'
+            } else {
+                Write-Step 'Git is still not visible in this PowerShell session. Continuing without Git proxy detection.'
+            }
+        } else {
+            Write-Step 'Continuing without Git proxy detection.'
+        }
+    }
 }
 
 function Test-IsAdministrator {
@@ -90,6 +165,12 @@ function Restart-AsAdministrator {
     }
     if ($RemoveRegisteredAppx) {
         $arguments += '-RemoveRegisteredAppx'
+    }
+    if ($PreserveExtraInstallFiles) {
+        $arguments += '-PreserveExtraInstallFiles'
+    }
+    if ($InstallMissingDependencies) {
+        $arguments += '-InstallMissingDependencies'
     }
 
     try {
@@ -354,13 +435,15 @@ function Get-CurlProxyArgs {
         }
     }
 
-    foreach ($key in @('https.proxy', 'http.proxy')) {
-        try {
-            $value = (& git config --global --get $key 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($value)) {
-                $candidates += $value.Trim()
+    if (Get-Command git.exe -ErrorAction SilentlyContinue) {
+        foreach ($key in @('https.proxy', 'http.proxy')) {
+            try {
+                $value = (& git config --global --get $key 2>$null)
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    $candidates += $value.Trim()
+                }
+            } catch {
             }
-        } catch {
         }
     }
 
@@ -482,6 +565,8 @@ function Cleanup-StaleUpdaterWork {
             Remove-TreeRobust -Path $_.FullName
         }
 }
+
+Ensure-UpdaterDependencies
 
 $installFull = Resolve-CodexInstallDir -DefaultPath $InstallDir
 $installParent = Split-Path -Parent $installFull

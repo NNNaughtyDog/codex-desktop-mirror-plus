@@ -34,6 +34,8 @@ https://github.com/owner/repo
 
 如果 Codex 安装在 `C:\Program Files` 等受保护目录，脚本会自动请求管理员权限。
 
+首次运行时，脚本会检查必要组件。普通更新主要依赖 Windows 自带的 `curl`、`tar`、`robocopy`；`Git` 只是用于自动读取代理配置。没有 Git 时脚本会询问是否接受通过 `winget` 安装，拒绝也可以继续更新。
+
 脚本默认更新位置是：
 
 ```text
@@ -49,6 +51,7 @@ D:\software\Codex
 用户端更新脚本会做这些检查：
 
 - 自动识别 x64 / ARM64。
+- 检查必要的 Windows 工具，缺少可选 Git 时询问是否安装。
 - 自动读取 GitHub Release 最新 Windows MSIX。
 - 在默认上游 `Wangnov/codex-app-mirror` 下，优先使用 `codexapp-r2.agentsmirror.com` 下载，失败后再回退到 GitHub Release。
 - 下载后做 SHA256 校验。
