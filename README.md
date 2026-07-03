@@ -50,13 +50,15 @@ D:\software\Codex
 
 - 自动识别 x64 / ARM64。
 - 自动读取 GitHub Release 最新 Windows MSIX。
+- 在默认上游 `Wangnov/codex-app-mirror` 下，优先使用 `codexapp-r2.agentsmirror.com` 下载，失败后再回退到 GitHub Release。
 - 下载后做 SHA256 校验。
 - 解包后确认包名是 `OpenAI.Codex`。
 - 覆盖前临时备份旧安装目录。
 - 没安装过时支持直接安装到新的/空的自定义目录。
 - 成功验证后删除临时文件和备份，不留几 GB 垃圾。
 - 失败时尝试回滚旧版本。
-- 保留安装目录里不属于官方 MSIX 包的自定义文件，例如你自己放的 `.bat`。
+- 默认只保留根目录 `.bat` / `.cmd` 和 `更新codex脚本` 目录，避免把旧版本残留文件当成自定义文件复制回来。
+- 如确实需要保留安装目录里的其他自定义文件，可以手动使用 `-PreserveExtraInstallFiles`。
 - 不碰用户历史、聊天、配置和工作目录。
 
 不会主动删除这些位置：
@@ -159,6 +161,18 @@ CodexDesktopUpdater.zip
 如果 Releases 里暂时还没有 `codex-windows-...`，说明自动同步还没有成功跑完。可以到 Actions 页面手动运行同步：
 
 - [Actions 页面](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/actions)
+
+## 关于下载速度和增量更新
+
+当前 Windows 解包安装方式仍然需要下载完整 MSIX 包。原因是公开 Release 里没有可靠的 Windows 增量补丁链路；脚本不能安全地只下载部分文件再拼装安装目录。
+
+为了改善国内下载体验，用户端脚本会：
+
+- 自动读取 Git / 环境变量里的代理配置；
+- 检测本机 `127.0.0.1:7890` 代理端口；
+- 默认上游为 `Wangnov/codex-app-mirror` 时，优先走 `codexapp-r2.agentsmirror.com`；
+- 只有下载、解包和校验都成功后才替换正式安装目录；
+- 每次运行前清理旧的 updater 工作目录，减少残留。
 
 ## 安全说明
 

@@ -3,7 +3,8 @@ param(
     [string] $Repo = 'Wangnov/codex-app-mirror',
     [switch] $NoLaunch,
     [switch] $KeepBackup,
-    [switch] $RemoveRegisteredAppx
+    [switch] $RemoveRegisteredAppx,
+    [switch] $PreserveExtraInstallFiles
 )
 
 $ErrorActionPreference = 'Stop'
@@ -268,6 +269,47 @@ function Get-AppxBlockMapFiles {
     return $set
 }
 
+function Get-PreservedInstallFiles {
+    param(
+        [string] $InstallRoot,
+        [Collections.Generic.HashSet[string]] $PackageFiles,
+        [switch] $PreserveExtra
+    )
+
+    $preserve = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+    Get-ChildItem -LiteralPath $InstallRoot -Force -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*.bat' -or $_.Name -like '*.cmd' } |
+        ForEach-Object {
+            [void]$preserve.Add($_.FullName.Substring($InstallRoot.Length).TrimStart('\'))
+        }
+
+    $scriptDir = Join-Path $InstallRoot '更新codex脚本'
+    if (Test-Path -LiteralPath $scriptDir) {
+        Get-ChildItem -LiteralPath $scriptDir -Recurse -Force -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                [void]$preserve.Add($_.FullName.Substring($InstallRoot.Length).TrimStart('\'))
+            }
+    }
+
+    if ($PreserveExtra -and $PackageFiles.Count -gt 0) {
+        Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $rel = $_.FullName.Substring($InstallRoot.Length).TrimStart('\')
+                -not $PackageFiles.Contains($rel)
+            } |
+            ForEach-Object {
+                [void]$preserve.Add($_.FullName.Substring($InstallRoot.Length).TrimStart('\'))
+            }
+    }
+
+    $result = @()
+    foreach ($item in $preserve) {
+        $result += $item
+    }
+    return $result
+}
+
 function Wait-ForCodexToClose {
     param([string] $TargetDir)
     $targetFull = Get-FullPath $TargetDir
@@ -417,6 +459,30 @@ function Get-LatestReleaseAsset {
     }
 }
 
+function Cleanup-StaleUpdaterWork {
+    param(
+        [string] $InstallParent,
+        [string] $CurrentWorkRoot
+    )
+
+    foreach ($path in @(
+        (Join-Path $InstallParent 'Codex-updater-work'),
+        (Join-Path $InstallParent 'Codex-update-26.623.5546.0'),
+        (Join-Path $InstallParent 'Codex-backups')
+    )) {
+        if ((Test-Path -LiteralPath $path) -and ([IO.Path]::GetFullPath($path) -ne [IO.Path]::GetFullPath($CurrentWorkRoot))) {
+            Write-Step "Removing stale updater directory: $path"
+            Remove-TreeRobust -Path $path
+        }
+    }
+
+    Get-ChildItem -LiteralPath $InstallParent -Directory -Force -ErrorAction SilentlyContinue -Filter 'empty-delete-*' |
+        ForEach-Object {
+            Write-Step "Removing stale cleanup directory: $($_.FullName)"
+            Remove-TreeRobust -Path $_.FullName
+        }
+}
+
 $installFull = Resolve-CodexInstallDir -DefaultPath $InstallDir
 $installParent = Split-Path -Parent $installFull
 Assert-SafeDirectory -Path $installFull -ExpectedParent $installParent
@@ -442,6 +508,11 @@ $backupDir = Join-Path $backupRoot $runId
 Assert-SafeDirectory -Path $workRoot -ExpectedParent $tempRoot
 Assert-SafeDirectory -Path $runDir -ExpectedParent $workRoot
 Assert-SafeDirectory -Path $backupRoot -ExpectedParent $installParent
+if (Test-Path -LiteralPath $workRoot) {
+    Write-Step "Removing stale updater work directory: $workRoot"
+    Remove-TreeRobust -Path $workRoot
+}
+Cleanup-StaleUpdaterWork -InstallParent $installParent -CurrentWorkRoot $workRoot
 New-Item -ItemType Directory -Force -Path $downloadDir, $extractDir | Out-Null
 
 $currentVersion = Get-AppxManifestVersion -Root $installFull
@@ -487,7 +558,7 @@ if ($assetPackageVersion -and $currentVersion -eq $assetPackageVersion) {
 }
 
 $msixPath = Join-Path $downloadDir $releaseInfo.AssetName
-$downloadUrls = @($releaseInfo.DownloadUrl)
+$downloadUrls = @()
 if ($activeRepo -eq 'Wangnov/codex-app-mirror') {
     $mirrorUrl = if ($arch -eq 'arm64') {
         'https://codexapp-r2.agentsmirror.com/latest/win-arm64'
@@ -496,6 +567,7 @@ if ($activeRepo -eq 'Wangnov/codex-app-mirror') {
     }
     $downloadUrls += $mirrorUrl
 }
+$downloadUrls += $releaseInfo.DownloadUrl
 
 $downloadedFrom = Download-FileWithFallback -Urls $downloadUrls -OutputPath $msixPath
 Write-Step "Downloaded from: $downloadedFrom"
@@ -536,21 +608,16 @@ if (-not $isFreshInstall) {
     Wait-ForCodexToClose -TargetDir $installFull
 }
 
-$customRelativeFiles = @()
 $oldPackageFiles = if ($isFreshInstall) {
     [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 } else {
     Get-AppxBlockMapFiles -Root $installFull
 }
-if (-not $isFreshInstall -and $oldPackageFiles.Count -gt 0) {
-    $customRelativeFiles = @(Get-ChildItem -LiteralPath $installFull -Recurse -Force -File -ErrorAction SilentlyContinue | Where-Object {
-        $rel = $_.FullName.Substring($installFull.Length).TrimStart('\')
-        -not $oldPackageFiles.Contains($rel)
-    } | ForEach-Object {
-        $_.FullName.Substring($installFull.Length).TrimStart('\')
-    })
+$customRelativeFiles = @()
+if (-not $isFreshInstall) {
+    $customRelativeFiles = @(Get-PreservedInstallFiles -InstallRoot $installFull -PackageFiles $oldPackageFiles -PreserveExtra:$PreserveExtraInstallFiles)
 }
-Write-Step "Custom install-dir files to preserve: $($customRelativeFiles.Count)"
+Write-Step "Whitelisted install-dir files to preserve: $($customRelativeFiles.Count)"
 
 $replaceSucceeded = $false
 try {
