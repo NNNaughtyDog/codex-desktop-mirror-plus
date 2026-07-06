@@ -37,6 +37,7 @@ jobs:
           3. If Windows warns about the script, keep/run it only when it came from your trusted GitHub repository.
           4. If Codex is installed under a protected folder such as C:\Program Files, the updater will request administrator permission.
           5. The updater checks required tools. If Git is missing, it asks whether to install it with winget; declining still allows the update, but Git proxy auto-detection is skipped.
+          6. The launcher runs from a temporary directory, verifies a full backup before replacement, and keeps diagnostic files if rollback is needed.
           '@ | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
           $zip = Join-Path $dist 'CodexDesktopUpdater.zip'
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force

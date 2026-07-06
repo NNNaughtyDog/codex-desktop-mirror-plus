@@ -5,7 +5,9 @@ param(
     [switch] $KeepBackup,
     [switch] $RemoveRegisteredAppx,
     [switch] $PreserveExtraInstallFiles,
-    [switch] $InstallMissingDependencies
+    [switch] $InstallMissingDependencies,
+    [switch] $SkipSelfRelocation,
+    [string] $SelfTempDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +16,31 @@ $ProgressPreference = 'SilentlyContinue'
 function Write-Step {
     param([string] $Message)
     Write-Host "[Codex updater] $Message"
+}
+
+$script:RunDirForFailure = ''
+$script:BackupDirForFailure = ''
+$script:InstallDirForFailure = ''
+
+trap {
+    Write-Host ''
+    Write-Step "Fatal error: $($_.Exception.Message)"
+    if ($script:InstallDirForFailure) {
+        Write-Step "Install directory: $script:InstallDirForFailure"
+    }
+    if ($script:BackupDirForFailure) {
+        Write-Step "Backup directory kept for recovery: $script:BackupDirForFailure"
+    }
+    if ($script:RunDirForFailure) {
+        Write-Step "Updater work directory kept for diagnosis: $script:RunDirForFailure"
+    }
+    if ([Environment]::UserInteractive -and -not $env:GITHUB_ACTIONS) {
+        try {
+            Read-Host 'Press Enter to close this window'
+        } catch {
+        }
+    }
+    exit 1
 }
 
 function Read-YesNo {
@@ -171,6 +198,13 @@ function Restart-AsAdministrator {
     }
     if ($InstallMissingDependencies) {
         $arguments += '-InstallMissingDependencies'
+    }
+    if ($SkipSelfRelocation) {
+        $arguments += '-SkipSelfRelocation'
+    }
+    if ($SelfTempDir) {
+        $arguments += '-SelfTempDir'
+        $arguments += (Quote-ProcessArgument $SelfTempDir)
     }
 
     try {
@@ -425,6 +459,125 @@ function Invoke-RobocopyMirror {
     }
 }
 
+function Test-PathInsideDirectory {
+    param(
+        [string] $Path,
+        [string] $Directory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Directory)) {
+        return $false
+    }
+
+    $pathFull = Get-FullPath $Path
+    $dirFull = Get-FullPath $Directory
+    if (-not $dirFull.EndsWith('\')) {
+        $dirFull += '\'
+    }
+    return $pathFull.StartsWith($dirFull, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Restart-FromTempIfNeeded {
+    param([string] $ResolvedInstallDir)
+
+    if ($SkipSelfRelocation -or -not $PSCommandPath) {
+        return
+    }
+
+    if (-not (Test-PathInsideDirectory -Path $PSCommandPath -Directory $ResolvedInstallDir)) {
+        return
+    }
+
+    $tempSelfDir = Join-Path ([IO.Path]::GetTempPath()) ('CodexDesktopUpdaterSelf-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tempSelfDir | Out-Null
+    $tempScript = Join-Path $tempSelfDir 'update-codex-desktop.ps1'
+    Copy-Item -LiteralPath $PSCommandPath -Destination $tempScript -Force
+
+    Write-Step "Updater script is inside the install directory. Relaunching from a temporary copy: $tempScript"
+
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', (Quote-ProcessArgument $tempScript),
+        '-InstallDir', (Quote-ProcessArgument $ResolvedInstallDir),
+        '-Repo', (Quote-ProcessArgument $Repo),
+        '-SkipSelfRelocation',
+        '-SelfTempDir', (Quote-ProcessArgument $tempSelfDir)
+    )
+    if ($NoLaunch) {
+        $arguments += '-NoLaunch'
+    }
+    if ($KeepBackup) {
+        $arguments += '-KeepBackup'
+    }
+    if ($RemoveRegisteredAppx) {
+        $arguments += '-RemoveRegisteredAppx'
+    }
+    if ($PreserveExtraInstallFiles) {
+        $arguments += '-PreserveExtraInstallFiles'
+    }
+    if ($InstallMissingDependencies) {
+        $arguments += '-InstallMissingDependencies'
+    }
+
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList ($arguments -join ' ') -Wait -PassThru
+    exit $process.ExitCode
+}
+
+function Remove-SelfTempDir {
+    if (-not [string]::IsNullOrWhiteSpace($SelfTempDir) -and (Test-Path -LiteralPath $SelfTempDir)) {
+        Remove-Item -LiteralPath $SelfTempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-ValidCodexInstallCopy {
+    param(
+        [string] $Path,
+        [string] $Label
+    )
+
+    if (-not (Test-CodexInstallDir -Path $Path)) {
+        throw "$Label is not a valid Codex desktop install copy: $Path"
+    }
+    $exe = Get-Item -LiteralPath (Join-Path $Path 'app\Codex.exe')
+    if ($exe.Length -le 0) {
+        throw "$Label contains an empty Codex.exe: $Path"
+    }
+    $version = Get-AppxManifestVersion -Root $Path
+    if (-not $version) {
+        throw "$Label does not contain a readable AppxManifest.xml: $Path"
+    }
+    return $version
+}
+
+function Restore-InstallFromSafetyCopies {
+    param(
+        [string] $InstallPath,
+        [string] $OldInstallPath,
+        [string] $BackupPath
+    )
+
+    if (Test-Path -LiteralPath $InstallPath) {
+        Write-Step "Removing incomplete install directory before rollback: $InstallPath"
+        Remove-TreeRobust -Path $InstallPath
+    }
+
+    if ((Test-Path -LiteralPath $OldInstallPath) -and (Test-CodexInstallDir -Path $OldInstallPath)) {
+        Write-Step "Rolling back by moving old install back: $OldInstallPath"
+        Move-Item -LiteralPath $OldInstallPath -Destination $InstallPath
+        return
+    }
+
+    if ((Test-Path -LiteralPath $BackupPath) -and (Test-CodexInstallDir -Path $BackupPath)) {
+        Write-Step "Rolling back by copying verified backup: $BackupPath"
+        New-Item -ItemType Directory -Force -Path $InstallPath | Out-Null
+        Invoke-RobocopyMirror -Source $BackupPath -Destination $InstallPath
+        return
+    }
+
+    throw "Rollback failed because no valid old install or backup was found. Old=$OldInstallPath Backup=$BackupPath"
+}
+
 function Get-CurlProxyArgs {
     $candidates = @()
 
@@ -589,16 +742,22 @@ $downloadDir = Join-Path $runDir 'download'
 $extractDir = Join-Path $runDir 'extract'
 $backupRoot = Join-Path $installParent 'Codex-updater-backup'
 $backupDir = Join-Path $backupRoot $runId
+$stageInstallDir = Join-Path $installParent ('Codex-updater-new-' + $runId)
+$oldInstallDir = Join-Path $installParent ('Codex-updater-old-' + $runId)
 
 Assert-SafeDirectory -Path $workRoot -ExpectedParent $tempRoot
 Assert-SafeDirectory -Path $runDir -ExpectedParent $workRoot
 Assert-SafeDirectory -Path $backupRoot -ExpectedParent $installParent
-if (Test-Path -LiteralPath $workRoot) {
-    Write-Step "Removing stale updater work directory: $workRoot"
-    Remove-TreeRobust -Path $workRoot
-}
+Assert-SafeDirectory -Path $stageInstallDir -ExpectedParent $installParent
+Assert-SafeDirectory -Path $oldInstallDir -ExpectedParent $installParent
+
+Restart-FromTempIfNeeded -ResolvedInstallDir $installFull
+
 Cleanup-StaleUpdaterWork -InstallParent $installParent -CurrentWorkRoot $workRoot
 New-Item -ItemType Directory -Force -Path $downloadDir, $extractDir | Out-Null
+$script:RunDirForFailure = $runDir
+$script:BackupDirForFailure = $backupDir
+$script:InstallDirForFailure = $installFull
 
 $currentVersion = Get-AppxManifestVersion -Root $installFull
 Write-Step "Current install: $installFull"
@@ -639,6 +798,7 @@ if ($releaseInfo.AssetName -match '^OpenAI\.Codex_([0-9.]+)_') {
 if ($assetPackageVersion -and $currentVersion -eq $assetPackageVersion) {
     Write-Step "Already on the latest package version ($currentVersion). No download needed."
     Remove-TreeRobust -Path $runDir
+    Remove-SelfTempDir
     return
 }
 
@@ -686,6 +846,7 @@ Write-Step "New package version: $newVersion"
 if ($currentVersion -eq $newVersion) {
     Write-Step 'Already on the latest package version. Cleaning temporary files.'
     Remove-TreeRobust -Path $runDir
+    Remove-SelfTempDir
     return
 }
 
@@ -706,38 +867,60 @@ Write-Step "Whitelisted install-dir files to preserve: $($customRelativeFiles.Co
 
 $replaceSucceeded = $false
 try {
-    if ($isFreshInstall) {
-        Write-Step "Installing Codex into: $installFull"
-        New-Item -ItemType Directory -Force -Path $installFull | Out-Null
-    } else {
-        Write-Step "Moving old install to backup: $backupDir"
+    if (-not $isFreshInstall) {
+        Write-Step "Creating verified backup before touching install directory: $backupDir"
         New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
-        Move-Item -LiteralPath $installFull -Destination $backupDir
-        Write-Step 'Copying new package into install directory.'
-        New-Item -ItemType Directory -Force -Path $installFull | Out-Null
+        Invoke-RobocopyMirror -Source $installFull -Destination $backupDir
+        $backupVersion = Assert-ValidCodexInstallCopy -Path $backupDir -Label 'Backup'
+        Write-Step "Backup verified: $backupVersion"
     }
 
-    Write-Step 'Copying package files.'
-    Invoke-RobocopyMirror -Source $extractDir -Destination $installFull
+    Write-Step "Building staged install directory: $stageInstallDir"
+    New-Item -ItemType Directory -Force -Path $stageInstallDir | Out-Null
+    Invoke-RobocopyMirror -Source $extractDir -Destination $stageInstallDir
 
     foreach ($rel in $customRelativeFiles) {
         $oldFile = Join-Path $backupDir $rel
-        $dest = Join-Path $installFull $rel
+        $dest = Join-Path $stageInstallDir $rel
         if ((Test-Path -LiteralPath $oldFile) -and -not (Test-Path -LiteralPath $dest)) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
             Copy-Item -LiteralPath $oldFile -Destination $dest -Force
         }
     }
 
-    $installedVersion = Get-AppxManifestVersion -Root $installFull
+    $stagedVersion = Assert-ValidCodexInstallCopy -Path $stageInstallDir -Label 'Staged install'
+    if ($stagedVersion -ne $newVersion) {
+        throw "Staged version check failed. Expected $newVersion, got $stagedVersion"
+    }
+
+    if ($isFreshInstall) {
+        Write-Step "Installing Codex into: $installFull"
+        if (Test-Path -LiteralPath $installFull) {
+            if (-not (Test-EmptyOrMissingDirectory -Path $installFull)) {
+                throw "Fresh install target is not empty: $installFull"
+            }
+            Remove-TreeRobust -Path $installFull
+        }
+        Move-Item -LiteralPath $stageInstallDir -Destination $installFull
+    } else {
+        Write-Step "Moving current install aside: $oldInstallDir"
+        Move-Item -LiteralPath $installFull -Destination $oldInstallDir
+        try {
+            Write-Step 'Promoting staged install into final directory.'
+            Move-Item -LiteralPath $stageInstallDir -Destination $installFull
+        } catch {
+            Write-Step "Promote failed: $($_.Exception.Message)"
+            Restore-InstallFromSafetyCopies -InstallPath $installFull -OldInstallPath $oldInstallDir -BackupPath $backupDir
+            throw
+        }
+    }
+
+    $installedVersion = Assert-ValidCodexInstallCopy -Path $installFull -Label 'Installed Codex'
     if ($installedVersion -ne $newVersion) {
         throw "Post-update version check failed. Expected $newVersion, got $installedVersion"
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $installFull 'app\Codex.exe'))) {
-        throw 'Post-update Codex.exe check failed.'
-    }
 
-    $runBat = Join-Path $installFull '运行Codex.bat'
+    $runBat = Join-Path $installFull 'Run-Codex.cmd'
     if (-not (Test-Path -LiteralPath $runBat)) {
         "@echo off`r`ncd /d ""%~dp0app""`r`nstart """" ""%~dp0app\Codex.exe""`r`n" |
             Set-Content -LiteralPath $runBat -Encoding ascii
@@ -751,15 +934,20 @@ try {
     }
 } catch {
     Write-Step "Update failed: $($_.Exception.Message)"
-    if (Test-Path -LiteralPath $installFull) {
-        Remove-TreeRobust -Path $installFull
-    }
-    if (-not $isFreshInstall -and (Test-Path -LiteralPath $backupDir)) {
+    if (-not $isFreshInstall) {
         Write-Step 'Attempting rollback.'
-        Move-Item -LiteralPath $backupDir -Destination $installFull
+        Restore-InstallFromSafetyCopies -InstallPath $installFull -OldInstallPath $oldInstallDir -BackupPath $backupDir
     }
     throw
 } finally {
+    if ($replaceSucceeded -and (Test-Path -LiteralPath $oldInstallDir)) {
+        Write-Step 'Removing old install directory after successful verification.'
+        Remove-TreeRobust -Path $oldInstallDir
+    }
+    if ($replaceSucceeded -and (Test-Path -LiteralPath $stageInstallDir)) {
+        Write-Step 'Removing unused staged install directory.'
+        Remove-TreeRobust -Path $stageInstallDir
+    }
     if ($replaceSucceeded -and -not $KeepBackup -and (Test-Path -LiteralPath $backupDir)) {
         Write-Step 'Removing backup after successful verification.'
         Remove-TreeRobust -Path $backupDir
@@ -778,6 +966,7 @@ if ($RemoveRegisteredAppx) {
 Write-Step 'Cleaning updater work directory.'
 Remove-TreeRobust -Path $runDir
 Remove-Item -LiteralPath $workRoot -Force -ErrorAction SilentlyContinue
+Remove-SelfTempDir
 
 if (-not $NoLaunch) {
     Write-Step 'Launching Codex from the updated install directory.'
