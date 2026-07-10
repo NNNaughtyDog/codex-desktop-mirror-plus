@@ -2,8 +2,27 @@ name: Sync ChatGPT Codex Windows Mirror
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Sync mode"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - full
+          - links-only
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/sync-windows.yml"
+      - "scripts/**"
+      - "client/**"
+      - "README.md"
+      - "docs/**"
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 */3 * * *"
 
 permissions:
   contents: write
@@ -17,8 +36,42 @@ jobs:
 
       - name: Sync ChatGPT/Codex Windows package
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          ./scripts/Sync-CodexWindowsMirror.ps1 -OutDir ./dist
+          $mode = '${{ inputs.mode }}'
+          if ([string]::IsNullOrWhiteSpace($mode)) {
+            $mode = 'auto'
+          }
+
+          $eventName = '${{ github.event_name }}'
+          $linksOnly = $false
+          $alreadyPreparedLinksOnly = $false
+
+          if ($mode -eq 'links-only') {
+            $linksOnly = $true
+          } elseif ($mode -eq 'auto') {
+            ./scripts/Sync-CodexWindowsMirror.ps1 -OutDir ./dist -LinksOnly
+            $alreadyPreparedLinksOnly = $true
+            $metadata = Get-Content -LiteralPath ./dist/release-metadata.json -Raw | ConvertFrom-Json
+            gh release view $metadata.releaseTag --repo "${{ github.repository }}" *> $null
+            $releaseExists = ($LASTEXITCODE -eq 0)
+
+            if ($eventName -eq 'schedule' -and $releaseExists) {
+              Write-Host "Scheduled run: release already exists, refreshing temporary links only."
+              $linksOnly = $true
+            } else {
+              Write-Host "Running full sync so GitHub Release contains MSIX assets."
+            }
+          }
+
+          if ($linksOnly) {
+            if (-not $alreadyPreparedLinksOnly) {
+              ./scripts/Sync-CodexWindowsMirror.ps1 -OutDir ./dist -LinksOnly
+            }
+          } else {
+            ./scripts/Sync-CodexWindowsMirror.ps1 -OutDir ./dist
+          }
 
       - name: Publish release
         if: success()

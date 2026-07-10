@@ -59,7 +59,11 @@ if (-not $existing) {
         throw "gh release create failed with exit code $LASTEXITCODE"
     }
 } else {
-    Write-Step "Release $tag already exists; uploading/replacing assets."
+    Write-Step "Release $tag already exists; refreshing title and notes."
+    & gh release edit $tag --repo $Repo --title $name --notes-file $notes
+    if ($LASTEXITCODE -ne 0) {
+        throw "gh release edit failed with exit code $LASTEXITCODE"
+    }
 }
 
 $assets = @(Get-ChildItem -LiteralPath $assetsDir -File)

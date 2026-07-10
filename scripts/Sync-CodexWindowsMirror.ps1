@@ -3,7 +3,8 @@ param(
     [string] $ProductId = '9PLM9XGG6VKS',
     [ValidateSet('Retail', 'RP', 'WIS', 'WIF')]
     [string] $Ring = 'Retail',
-    [string] $Lang = 'en-US'
+    [string] $Lang = 'en-US',
+    [switch] $LinksOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,8 +110,18 @@ function Get-StoreFileLinks {
         }
     }
 
-    $packages = @($rows | Where-Object {
-        $_.File -match '^OpenAI\.Codex_[0-9.]+_(x64|arm64)__2p2nqsd0c76g0\.msix$'
+    $packages = @($rows | ForEach-Object {
+        if ($_.File -match '^OpenAI\.Codex_([0-9.]+)_(x64|arm64)__2p2nqsd0c76g0\.msix$') {
+            [pscustomobject]@{
+                Url = $_.Url
+                File = $_.File
+                Version = $matches[1]
+                Architecture = $matches[2]
+                Expire = $_.Expire
+                Sha1 = $_.Sha1
+                SizeText = $_.SizeText
+            }
+        }
     } | Sort-Object File)
 
     if ($packages.Count -eq 0) {
@@ -131,6 +142,37 @@ $items = @()
 
 foreach ($storeFile in $storeFiles) {
     $downloadName = $storeFile.File
+    $normalizedName = "OpenAI.Codex_$($storeFile.Version)_$($storeFile.Architecture)__2p2nqsd0c76g0.msix"
+
+    if ($LinksOnly) {
+        $items += [pscustomobject][ordered]@{
+            file = $normalizedName
+            sha256 = $null
+            sha1 = $storeFile.Sha1
+            size = $null
+            sizeText = $storeFile.SizeText
+            packageIdentity = 'OpenAI.Codex'
+            packageVersion = $storeFile.Version
+            architecture = $storeFile.Architecture
+            publisher = $null
+            displayName = 'ChatGPT'
+            executable = $null
+            temporaryUrl = $storeFile.Url
+            expiresUtc = $storeFile.Expire
+            source = [ordered]@{
+                method = 'microsoft-store-cdn'
+                productId = $ProductId
+                ring = $Ring
+                resolver = 'store.rg-adguard.net'
+                storeFile = $storeFile.File
+                storeSha1 = $storeFile.Sha1
+                expiresUtc = $storeFile.Expire
+                temporaryUrl = $storeFile.Url
+            }
+        }
+        continue
+    }
+
     $downloadPath = Join-Path $downloadDir $downloadName
     Invoke-CurlDownload -Url $storeFile.Url -OutputPath $downloadPath
 
@@ -159,12 +201,15 @@ foreach ($storeFile in $storeFiles) {
         sha256 = Get-Sha256 -Path $dest
         sha1 = $actualSha1
         size = (Get-Item -LiteralPath $dest).Length
+        sizeText = $storeFile.SizeText
         packageIdentity = $manifest.Name
         packageVersion = $manifest.Version
         architecture = $manifest.Architecture
         publisher = $manifest.Publisher
         displayName = $manifest.DisplayName
         executable = ($manifest.Executable -replace '/', '\')
+        temporaryUrl = $storeFile.Url
+        expiresUtc = $storeFile.Expire
         source = [ordered]@{
             method = 'microsoft-store-cdn'
             productId = $ProductId
@@ -173,6 +218,7 @@ foreach ($storeFile in $storeFiles) {
             storeFile = $storeFile.File
             storeSha1 = $storeFile.Sha1
             expiresUtc = $storeFile.Expire
+            temporaryUrl = $storeFile.Url
         }
     }
 }
@@ -185,11 +231,13 @@ if ($versions.Count -ne 1) {
 $releaseVersion = $versions[0]
 $releaseTag = "chatgpt-codex-windows-$releaseVersion"
 
-$checksumsPath = Join-Path $assetsDir 'SHA256SUMS-windows.txt'
-$items |
-    Sort-Object architecture |
-    ForEach-Object { "$($_.sha256)  $($_.file)" } |
-    Set-Content -LiteralPath $checksumsPath -Encoding utf8
+if (-not $LinksOnly) {
+    $checksumsPath = Join-Path $assetsDir 'SHA256SUMS-windows.txt'
+    $items |
+        Sort-Object architecture |
+        ForEach-Object { "$($_.sha256)  $($_.file)" } |
+        Set-Content -LiteralPath $checksumsPath -Encoding utf8
+}
 
 $manifestObject = [ordered]@{
     schema = 2
@@ -199,33 +247,88 @@ $manifestObject = [ordered]@{
     packageIdentity = 'OpenAI.Codex'
     productName = 'ChatGPT'
     productId = $ProductId
+    linksOnly = [bool]$LinksOnly
     assets = $items
 }
 
 $manifestPath = Join-Path $assetsDir 'release-manifest.json'
 $manifestObject | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
-$assetLines = $items |
+$tempLinksObject = [ordered]@{
+    generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    productName = 'ChatGPT'
+    productId = $ProductId
+    packageIdentity = 'OpenAI.Codex'
+    packageVersion = $releaseVersion
+    note = 'These Microsoft Store CDN URLs are temporary and may expire. Refresh the GitHub release if a link no longer works.'
+    links = @($items | Sort-Object architecture | ForEach-Object {
+        [ordered]@{
+            architecture = $_.architecture
+            file = $_.file
+            url = $_.temporaryUrl
+            expiresUtc = $_.expiresUtc
+            sha1 = $_.sha1
+            sizeText = $_.sizeText
+        }
+    })
+}
+$tempLinksJsonPath = Join-Path $assetsDir 'store-temp-links.json'
+$tempLinksObject | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tempLinksJsonPath -Encoding utf8
+
+$directLinkLines = $items |
     Sort-Object architecture |
     ForEach-Object {
-        "- $($_.architecture): ``$($_.file)`` ($([math]::Round($_.size / 1MB, 1)) MB), executable ``$($_.executable)``"
+        "- $($_.architecture): [$($_.file)]($($_.temporaryUrl)) (`SHA1: $($_.sha1)`, size: $($_.sizeText), expires: $($_.expiresUtc))"
     } |
     Out-String
+
+$tempLinksMarkdownPath = Join-Path $assetsDir 'LATEST_TEMP_LINKS.md'
+@"
+# Latest Temporary Microsoft Store Links
+
+Generated: $((Get-Date).ToUniversalTime().ToString('o'))
+
+These direct links come from Microsoft Store CDN resolution for product $ProductId. They are temporary and may expire. If a link fails, wait for the next scheduled refresh or run the workflow manually.
+
+$directLinkLines
+"@ | Set-Content -LiteralPath $tempLinksMarkdownPath -Encoding utf8
+
+if ($LinksOnly) {
+    $assetLines = "This scheduled refresh updated the temporary Microsoft Store CDN links only. Existing MSIX assets on the release are preserved if they were uploaded by an earlier full sync."
+} else {
+    $assetLines = ($items |
+        Sort-Object architecture |
+        ForEach-Object {
+            "- $($_.architecture): $($_.file) ($([math]::Round($_.size / 1MB, 1)) MB), executable $($_.executable)"
+        } |
+        Out-String)
+}
 
 $releaseNotesPath = Join-Path $outFull 'RELEASE_NOTES.md'
 @"
 # ChatGPT / Codex Windows Desktop $releaseVersion
 
-This release mirrors the Windows MSIX package for the ChatGPT desktop app that carries the Codex product identity (`OpenAI.Codex`).
+This release mirrors the Windows MSIX package for the ChatGPT desktop app that carries the Codex product identity OpenAI.Codex.
 
-The upstream app was rebranded from Codex to ChatGPT in the 26.707 line. The package identity remains `OpenAI.Codex`, while the application entry point may be `app\ChatGPT.exe`.
+The upstream app was rebranded from Codex to ChatGPT in the 26.707 line. The package identity remains OpenAI.Codex, while the application entry point may be app\ChatGPT.exe.
 
 ## Assets
 
 $assetLines
+
+## Temporary Direct Download Links
+
+These links are useful when GitHub assets have not been uploaded yet or when you want to download directly from Microsoft CDN. They are temporary and may expire, so this release refreshes them on a schedule.
+
+$directLinkLines
+
 ## Verification
 
-Use `SHA256SUMS-windows.txt` to verify downloaded files.
+For GitHub-hosted MSIX assets, use SHA256SUMS-windows.txt to verify downloaded files.
+
+For temporary Microsoft Store links, compare the SHA1 value shown above with:
+
+    Get-FileHash .\OpenAI.Codex_$($releaseVersion)_x64__2p2nqsd0c76g0.msix -Algorithm SHA1
 
 This repository mirrors installer files and does not modify or patch them.
 "@ | Set-Content -LiteralPath $releaseNotesPath -Encoding utf8
@@ -236,6 +339,7 @@ $metadataPath = Join-Path $outFull 'release-metadata.json'
     releaseName = "ChatGPT / Codex Windows Desktop $releaseVersion"
     releaseNotes = $releaseNotesPath
     assetsDir = $assetsDir
+    linksOnly = [bool]$LinksOnly
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $metadataPath -Encoding utf8
 
 Write-Step "Prepared release $releaseTag"

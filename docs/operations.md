@@ -5,11 +5,15 @@
 1. Push this repository to GitHub.
 2. Enable GitHub Actions release publishing:
    `Settings -> Actions -> General -> Workflow permissions -> Read and write permissions`.
-3. Run `Sync ChatGPT Codex Windows Mirror` manually once.
+3. Run `Sync ChatGPT Codex Windows Mirror` manually once, or push to `main` and let the workflow run.
 
-## What The Sync Job Does
+## Product Identity
 
-`scripts/Sync-CodexWindowsMirror.ps1` resolves Microsoft Store product `9PLM9XGG6VKS` and downloads the current `OpenAI.Codex` MSIX files from Microsoft CDN.
+The Microsoft Store product ID is:
+
+```text
+9PLM9XGG6VKS
+```
 
 The upstream product is branded as ChatGPT, but the Windows package identity remains:
 
@@ -17,7 +21,7 @@ The upstream product is branded as ChatGPT, but the Windows package identity rem
 OpenAI.Codex
 ```
 
-The 26.707 line may declare this executable in `AppxManifest.xml`:
+New packages may declare this executable in `AppxManifest.xml`:
 
 ```text
 app\ChatGPT.exe
@@ -29,24 +33,62 @@ Older packages may declare or use:
 app\Codex.exe
 ```
 
-The scripts must always trust `AppxManifest.xml`, not a hard-coded executable name.
+Scripts must trust `AppxManifest.xml`, not a hard-coded executable name.
+
+## Workflow Behavior
+
+`.github/workflows/sync-windows.yml` runs in three cases:
+
+- push to `main`;
+- manual `workflow_dispatch`;
+- scheduled cron every 3 hours.
+
+The default `auto` mode works like this:
+
+- Push/manual runs perform a full sync and upload MSIX assets.
+- Scheduled runs first resolve current Microsoft Store links.
+- If the release tag already exists, scheduled runs refresh release notes and temporary link assets only.
+- If a new package version is found and no release exists, scheduled runs perform a full sync and create the release.
+
+This keeps `Temporary Direct Download Links` fresh without re-uploading 1GB+ packages every 3 hours.
 
 ## Local Publishing
+
+Full sync:
 
 ```powershell
 .\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist
 .\scripts\Publish-GitHubRelease.ps1 -DistDir .\dist -Repo "NNNaughtyDog/codex-desktop-mirror-plus"
 ```
 
-The Store CDN links returned by the resolver are temporary. Run sync and publish in the same job/session.
+Temporary-link refresh only:
+
+```powershell
+.\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist -LinksOnly
+.\scripts\Publish-GitHubRelease.ps1 -DistDir .\dist -Repo "NNNaughtyDog/codex-desktop-mirror-plus"
+```
+
+`Publish-GitHubRelease.ps1` edits an existing release title/notes before uploading assets, so refreshed temporary links appear on the GitHub Releases page.
 
 ## Generated Assets
+
+Full sync generates:
 
 ```text
 OpenAI.Codex_<version>_x64__2p2nqsd0c76g0.msix
 OpenAI.Codex_<version>_arm64__2p2nqsd0c76g0.msix
 SHA256SUMS-windows.txt
 release-manifest.json
+LATEST_TEMP_LINKS.md
+store-temp-links.json
+```
+
+Links-only sync generates:
+
+```text
+release-manifest.json
+LATEST_TEMP_LINKS.md
+store-temp-links.json
 ```
 
 Release tags use the package version:
@@ -55,46 +97,42 @@ Release tags use the package version:
 chatgpt-codex-windows-26.707.3748.0
 ```
 
-## User Updater
+## User Data Safety
 
-Give users both files from `client/`:
+Manual updates should replace only the unpacked app directory, for example:
 
 ```text
-update-codex-desktop.ps1
-run-update-codex-desktop.cmd
+D:\software\Codex
 ```
 
-They should keep both files together and double-click the `.cmd`.
+Do not delete likely user-data locations:
 
-The updater:
+```text
+%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0
+%APPDATA%\OpenAI
+%USERPROFILE%\.codex
+user project workspaces
+```
 
-- reads latest release assets from this repository by default;
-- verifies SHA256 before extracting;
-- validates `OpenAI.Codex` in `AppxManifest.xml`;
-- supports `ChatGPT.exe` and `Codex.exe`;
-- waits for the app to close instead of killing it;
-- creates a verified backup before switching directories;
-- attempts rollback on failure.
+The updater waits for the app to close, creates a verified backup of the install directory, switches directories, and attempts rollback on failure.
 
 ## Troubleshooting
 
-### The sync job cannot resolve Store files
+### Releases did not update after pushing code
 
-The resolver endpoint or Microsoft Store metadata may be temporarily unavailable. Re-run the workflow later, or run the sync script locally from a network that can reach Microsoft CDN.
+Check the `Sync ChatGPT Codex Windows Mirror` workflow run. A Git commit only changes the scripts; the release is updated after the workflow completes.
+
+### GitHub Release exists but temporary links are stale
+
+Run the workflow manually with `mode=links-only`. The release notes and `LATEST_TEMP_LINKS.md` should be edited in place.
 
 ### The updater says no MSIX asset exists
 
-Make sure the latest GitHub release contains an asset matching:
+Make sure the latest release contains an asset matching:
 
 ```text
 OpenAI.Codex_*_x64__2p2nqsd0c76g0.msix
 OpenAI.Codex_*_arm64__2p2nqsd0c76g0.msix
 ```
 
-### The app is still running
-
-Close ChatGPT / Codex windows. The updater filters by executable path under the install root, so it should not confuse unrelated ChatGPT Classic installs with this package.
-
-### The app name changed after update
-
-That is expected. The Store listing is now ChatGPT, but this project continues tracking the Codex product identity `OpenAI.Codex`.
+If only temporary links exist, run a full sync.
