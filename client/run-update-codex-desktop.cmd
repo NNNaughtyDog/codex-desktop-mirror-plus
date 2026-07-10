@@ -4,7 +4,7 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 
 if /I not "%~1"=="--temp-launcher" (
-    set "TEMP_LAUNCHER=%TEMP%\CodexDesktopUpdaterLauncher-%RANDOM%-%RANDOM%"
+    set "TEMP_LAUNCHER=%TEMP%\ChatGPTCodexUpdater-%RANDOM%-%RANDOM%"
     mkdir "%TEMP_LAUNCHER%" >nul 2>nul
     copy /Y "%SCRIPT_DIR%update-codex-desktop.ps1" "%TEMP_LAUNCHER%\update-codex-desktop.ps1" >nul
     copy /Y "%~f0" "%TEMP_LAUNCHER%\run-update-codex-desktop.cmd" >nul
@@ -13,14 +13,17 @@ if /I not "%~1"=="--temp-launcher" (
         pause >nul
         exit /b 1
     )
+    pushd "%TEMP%" >nul
     cmd /c ""%TEMP_LAUNCHER%\run-update-codex-desktop.cmd" --temp-launcher"
     set "UPDATER_EXIT=%ERRORLEVEL%"
+    popd >nul
     rmdir /s /q "%TEMP_LAUNCHER%" >nul 2>nul
     exit /b %UPDATER_EXIT%
 )
 
+cd /d "%SCRIPT_DIR%"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%update-codex-desktop.ps1"
 
 echo.
-echo Codex desktop updater finished. Press any key to close this window.
+echo ChatGPT/Codex desktop updater finished. Press any key to close this window.
 pause >nul

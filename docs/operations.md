@@ -2,87 +2,99 @@
 
 ## First-Time Setup
 
-1. Create a GitHub repository.
-2. Push this project to it.
-3. Enable GitHub Actions with read/write release permission:
-   - Settings -> Actions -> General -> Workflow permissions -> Read and write permissions.
-4. Run the workflow manually once.
+1. Push this repository to GitHub.
+2. Enable GitHub Actions release publishing:
+   `Settings -> Actions -> General -> Workflow permissions -> Read and write permissions`.
+3. Run `Sync ChatGPT Codex Windows Mirror` manually once.
+
+## What The Sync Job Does
+
+`scripts/Sync-CodexWindowsMirror.ps1` resolves Microsoft Store product `9PLM9XGG6VKS` and downloads the current `OpenAI.Codex` MSIX files from Microsoft CDN.
+
+The upstream product is branded as ChatGPT, but the Windows package identity remains:
+
+```text
+OpenAI.Codex
+```
+
+The 26.707 line may declare this executable in `AppxManifest.xml`:
+
+```text
+app\ChatGPT.exe
+```
+
+Older packages may declare or use:
+
+```text
+app\Codex.exe
+```
+
+The scripts must always trust `AppxManifest.xml`, not a hard-coded executable name.
 
 ## Local Publishing
 
-Install GitHub CLI:
-
-```powershell
-winget install --id GitHub.cli -e
-```
-
-Authenticate with browser/device flow:
-
-```powershell
-gh auth login
-```
-
-Then publish:
-
 ```powershell
 .\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist
-.\scripts\Publish-GitHubRelease.ps1 -DistDir .\dist -Repo "your-name/your-repo"
+.\scripts\Publish-GitHubRelease.ps1 -DistDir .\dist -Repo "NNNaughtyDog/codex-desktop-mirror-plus"
+```
+
+The Store CDN links returned by the resolver are temporary. Run sync and publish in the same job/session.
+
+## Generated Assets
+
+```text
+OpenAI.Codex_<version>_x64__2p2nqsd0c76g0.msix
+OpenAI.Codex_<version>_arm64__2p2nqsd0c76g0.msix
+SHA256SUMS-windows.txt
+release-manifest.json
+```
+
+Release tags use the package version:
+
+```text
+chatgpt-codex-windows-26.707.3748.0
 ```
 
 ## User Updater
 
-Give users the release asset:
-
-```text
-CodexDesktopUpdater.zip
-```
-
-It is generated automatically from `client/` during `Sync-CodexWindowsMirror.ps1` and uploaded by `Publish-GitHubRelease.ps1`.
-
-Users should extract the zip and double-click `run-update-codex-desktop.cmd`.
-
-If you need a fallback, give users both files from `client/` and tell them to keep the files together:
+Give users both files from `client/`:
 
 ```text
 update-codex-desktop.ps1
 run-update-codex-desktop.cmd
 ```
 
+They should keep both files together and double-click the `.cmd`.
+
 The updater:
 
-- finds `D:\software\Codex` by default;
-- prompts for an absolute path if Codex is elsewhere;
-- asks Windows for administrator permission if the install folder is protected;
-- prompts for a new GitHub mirror repo if the default disappears;
-- verifies SHA256 before updating;
-- keeps custom install-directory files that are not part of the old MSIX package;
-- deletes temporary files and backup after a successful update.
-
-## If The Mirror Repo Changes
-
-Run the updater with a different repo:
-
-```powershell
-.\client\update-codex-desktop.ps1 -Repo "owner/repo"
-```
-
-or enter the replacement repo when prompted.
+- reads latest release assets from this repository by default;
+- verifies SHA256 before extracting;
+- validates `OpenAI.Codex` in `AppxManifest.xml`;
+- supports `ChatGPT.exe` and `Codex.exe`;
+- waits for the app to close instead of killing it;
+- creates a verified backup before switching directories;
+- attempts rollback on failure.
 
 ## Troubleshooting
 
-### `winget download` fails
+### The sync job cannot resolve Store files
 
-Microsoft Store downloads can be blocked by runner policy, region, or Store service changes.
+The resolver endpoint or Microsoft Store metadata may be temporarily unavailable. Re-run the workflow later, or run the sync script locally from a network that can reach Microsoft CDN.
 
-Fallback:
+### The updater says no MSIX asset exists
 
-1. Run `Sync-CodexWindowsMirror.ps1` on your own Windows machine.
-2. Publish the generated `dist/assets` using `Publish-GitHubRelease.ps1`.
+Make sure the latest GitHub release contains an asset matching:
 
-### GitHub Release asset is missing SHA256
+```text
+OpenAI.Codex_*_x64__2p2nqsd0c76g0.msix
+OpenAI.Codex_*_arm64__2p2nqsd0c76g0.msix
+```
 
-The sync script writes `SHA256SUMS-windows.txt`; the user updater can use that even when GitHub asset digest metadata is unavailable.
+### The app is still running
 
-### User updater says Codex is still running
+Close ChatGPT / Codex windows. The updater filters by executable path under the install root, so it should not confuse unrelated ChatGPT Classic installs with this package.
 
-Close all Codex windows. The updater waits instead of killing Codex to avoid interrupting active work.
+### The app name changed after update
+
+That is expected. The Store listing is now ChatGPT, but this project continues tracking the Codex product identity `OpenAI.Codex`.

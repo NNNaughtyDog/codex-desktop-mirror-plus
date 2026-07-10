@@ -1,15 +1,14 @@
 param(
     [string] $OutDir = '.\dist',
-    [string] $PackageId = '9PLM9XGG6VKS',
-    [string] $Source = 'msstore',
-    [string] $FallbackRepo = 'Wangnov/codex-app-mirror',
-    [switch] $NoFallback
+    [string] $ProductId = '9PLM9XGG6VKS',
+    [ValidateSet('Retail', 'RP', 'WIS', 'WIF')]
+    [string] $Ring = 'Retail',
+    [string] $Lang = 'en-US'
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-# The workflow first tries Microsoft Store, then falls back to a GitHub mirror.
 function Write-Step {
     param([string] $Message)
     Write-Host "[mirror-sync] $Message"
@@ -20,49 +19,26 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function New-ClientUpdaterPackage {
-    param([string] $TargetDir)
+function Invoke-CurlDownload {
+    param(
+        [string] $Url,
+        [string] $OutputPath
+    )
 
-    $repoRoot = Split-Path -Parent $PSScriptRoot
-    $clientDir = Join-Path $repoRoot 'client'
-    $staging = Join-Path ([IO.Path]::GetTempPath()) ('codex-client-updater-' + [guid]::NewGuid().ToString('N'))
-    $zipPath = Join-Path $TargetDir 'CodexDesktopUpdater.zip'
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+        throw 'curl.exe is required.'
+    }
 
-    New-Item -ItemType Directory -Force -Path $staging | Out-Null
-    try {
-        Copy-Item -LiteralPath (Join-Path $clientDir 'run-update-codex-desktop.cmd') -Destination $staging -Force
-        Copy-Item -LiteralPath (Join-Path $clientDir 'update-codex-desktop.ps1') -Destination $staging -Force
-
-        @"
-Codex Desktop Updater
-
-中文说明：
-1. 先关闭所有 Codex 窗口。
-2. 双击 run-update-codex-desktop.cmd。
-3. 如果 Windows 提示安全风险，确认这是从你的 GitHub 仓库下载后，选择保留/仍要运行。
-4. 如果 Codex 安装在 C:\Program Files 等受保护目录，脚本会自动请求管理员权限。
-5. 脚本会检查必要组件。没有 Git 时会询问是否通过 winget 安装；拒绝也能继续更新，只是不会自动读取 Git 代理配置。
-6. 启动器会从临时目录运行，更新前会先验证完整备份，失败时会尝试回滚并保留诊断信息。
-
-English:
-1. Close all Codex windows.
-2. Double-click run-update-codex-desktop.cmd.
-3. If Windows warns about the script, keep/run it only when it came from your trusted GitHub repository.
-4. If Codex is installed under a protected folder such as C:\Program Files, the updater will request administrator permission.
-5. The updater checks required tools. If Git is missing, it asks whether to install it with winget; declining still allows the update, but Git proxy auto-detection is skipped.
-6. The launcher runs from a temporary directory, verifies a full backup before replacement, and keeps diagnostic files if rollback is needed.
-"@ | Set-Content -LiteralPath (Join-Path $staging 'README.txt') -Encoding utf8
-
-        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
-        Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -Force
-        Write-Step "Prepared user updater package: $zipPath"
-    } finally {
-        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Step "Downloading $Url"
+    & curl.exe -L --fail --retry 5 --retry-delay 2 --connect-timeout 30 --output $OutputPath $Url
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl failed with exit code $LASTEXITCODE"
     }
 }
 
 function Read-PackageManifest {
     param([string] $MsixPath)
+
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('codex-msix-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $temp | Out-Null
     try {
@@ -70,118 +46,78 @@ function Read-PackageManifest {
         if ($LASTEXITCODE -ne 0) {
             throw "tar failed with exit code $LASTEXITCODE"
         }
+
         $manifestPath = Join-Path $temp 'AppxManifest.xml'
         if (-not (Test-Path -LiteralPath $manifestPath)) {
             throw 'MSIX does not contain AppxManifest.xml.'
         }
+
         $xml = [xml](Get-Content -LiteralPath $manifestPath -Raw)
+        $application = $xml.Package.Applications.Application | Select-Object -First 1
         return [pscustomobject]@{
             Name = [string]$xml.Package.Identity.Name
             Version = [string]$xml.Package.Identity.Version
             Architecture = [string]$xml.Package.Identity.ProcessorArchitecture
             Publisher = [string]$xml.Package.Identity.Publisher
             DisplayName = [string]$xml.Package.Properties.DisplayName
+            Executable = [string]$application.Executable
         }
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-function Invoke-WingetDownload {
+function Get-StoreFileLinks {
     param(
-        [string] $Id,
-        [string] $StoreSource,
-        [string] $TargetDir
+        [string] $StoreProductId,
+        [string] $StoreRing,
+        [string] $StoreLang
     )
 
-    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-        throw 'winget.exe is required for Microsoft Store downloads.'
+    $body = "type=ProductId&url=$StoreProductId&ring=$StoreRing&lang=$StoreLang"
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 codex-desktop-mirror-plus'
+        'Referer' = 'https://store.rg-adguard.net/'
     }
 
-    Write-Step "Running winget download for package '$Id' from source '$StoreSource'."
-    $args = @(
-        'download',
-        '--id', $Id,
-        '--source', $StoreSource,
-        '--download-directory', $TargetDir,
-        '--accept-package-agreements',
-        '--accept-source-agreements',
-        '--disable-interactivity'
-    )
+    Write-Step "Resolving Microsoft Store package links for ProductId=$StoreProductId Ring=$StoreRing."
+    $response = Invoke-WebRequest `
+        -UseBasicParsing `
+        -Method POST `
+        -Uri 'https://store.rg-adguard.net/api/GetFiles' `
+        -Body $body `
+        -ContentType 'application/x-www-form-urlencoded' `
+        -Headers $headers `
+        -TimeoutSec 90
 
-    & winget.exe @args
-    if ($LASTEXITCODE -ne 0) {
-        throw "winget download failed with exit code $LASTEXITCODE."
-    }
-}
-
-function Get-GitHubRelease {
-    param([string] $RepoName)
-    $uri = "https://api.github.com/repos/$RepoName/releases/latest"
-    return Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'codex-desktop-mirror-plus' }
-}
-
-function Get-ReleaseChecksumMap {
-    param($Release)
-    $map = @{}
-    $sumAsset = $Release.assets | Where-Object { $_.name -eq 'SHA256SUMS-windows.txt' } | Select-Object -First 1
-    if (-not $sumAsset) {
-        return $map
+    $content = [string]$response.Content
+    if ($content -notmatch 'OpenAI\.Codex_') {
+        throw 'The Store file resolver did not return OpenAI.Codex packages.'
     }
 
-    try {
-        $resp = Invoke-WebRequest -UseBasicParsing -Uri $sumAsset.browser_download_url
-        $content = if ($resp.Content -is [byte[]]) {
-            [Text.Encoding]::UTF8.GetString($resp.Content)
-        } else {
-            [string]$resp.Content
-        }
-        foreach ($line in ($content -split "`r?`n")) {
-            if ($line -match '^([a-fA-F0-9]{64})\s+(.+)$') {
-                $map[$matches[2].Trim()] = $matches[1].ToLowerInvariant()
+    $rows = @()
+    foreach ($match in [regex]::Matches($content, '<tr.*?</tr>', 'Singleline')) {
+        $row = $match.Value
+        if ($row -match '<a href="([^"]+)"[^>]*>([^<]+)</a>.*?<td align="center">([^<]+)</td>.*?<td align="center">([^<]+)</td>.*?<td align="center">([^<]+)</td>') {
+            $rows += [pscustomobject]@{
+                Url = [System.Net.WebUtility]::HtmlDecode($matches[1])
+                File = [System.Net.WebUtility]::HtmlDecode($matches[2])
+                Expire = $matches[3]
+                Sha1 = $matches[4].ToLowerInvariant()
+                SizeText = $matches[5]
             }
         }
-    } catch {
-        Write-Step "Could not read fallback checksum file: $($_.Exception.Message)"
-    }
-    return $map
-}
-
-function Invoke-GitHubFallbackDownload {
-    param(
-        [string] $RepoName,
-        [string] $TargetDir
-    )
-
-    Write-Step "Falling back to GitHub mirror repo: $RepoName"
-    $release = Get-GitHubRelease -RepoName $RepoName
-    $checksumMap = Get-ReleaseChecksumMap -Release $release
-    $assets = @($release.assets | Where-Object { $_.name -match '^OpenAI\.Codex_.*_(x64|arm64)__.*\.Msix$' })
-    if ($assets.Count -eq 0) {
-        throw "Fallback repo $RepoName does not expose Windows OpenAI.Codex MSIX assets on its latest release."
     }
 
-    foreach ($asset in $assets) {
-        $dest = Join-Path $TargetDir $asset.name
-        Write-Step "Downloading fallback asset: $($asset.name)"
-        & curl.exe -L --fail --retry 5 --retry-delay 2 --output $dest $asset.browser_download_url
-        if ($LASTEXITCODE -ne 0) {
-            throw "curl failed for $($asset.name) with exit code $LASTEXITCODE"
-        }
+    $packages = @($rows | Where-Object {
+        $_.File -match '^OpenAI\.Codex_[0-9.]+_(x64|arm64)__2p2nqsd0c76g0\.msix$'
+    } | Sort-Object File)
 
-        $actual = Get-Sha256 -Path $dest
-        $expected = $null
-        if ($asset.PSObject.Properties.Name -contains 'digest' -and $asset.digest) {
-            $expected = ([string]$asset.digest) -replace '^sha256:', ''
-        }
-        if (-not $expected -and $checksumMap.ContainsKey($asset.name)) {
-            $expected = $checksumMap[$asset.name]
-        }
-        if ($expected -and $actual -ne $expected.ToLowerInvariant()) {
-            throw "SHA256 mismatch for $($asset.name). Expected $expected, got $actual"
-        }
-        Write-Step "Verified fallback asset: $($asset.name)"
+    if ($packages.Count -eq 0) {
+        throw 'No OpenAI.Codex Windows MSIX files were found in the Store file list.'
     }
+
+    return $packages
 }
 
 $outFull = [IO.Path]::GetFullPath($OutDir)
@@ -190,61 +126,55 @@ $assetsDir = Join-Path $outFull 'assets'
 Remove-Item -LiteralPath $outFull -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $downloadDir, $assetsDir | Out-Null
 
-try {
-    Invoke-WingetDownload -Id $PackageId -StoreSource $Source -TargetDir $downloadDir
-} catch {
-    if ($NoFallback) {
-        throw
-    }
-    Write-Step "winget download failed: $($_.Exception.Message)"
-    Invoke-GitHubFallbackDownload -RepoName $FallbackRepo -TargetDir $downloadDir
-}
-
-$msixFiles = @(Get-ChildItem -LiteralPath $downloadDir -Recurse -File -Include '*.msix','*.appx' |
-    Where-Object { $_.Name -match 'Codex|OpenAI' -or $_.FullName -match 'Codex|OpenAI' })
-
-if ($msixFiles.Count -eq 0) {
-    $msixFiles = @(Get-ChildItem -LiteralPath $downloadDir -Recurse -File -Include '*.msix','*.appx')
-}
-
-if ($msixFiles.Count -eq 0) {
-    throw 'No MSIX/AppX files were downloaded.'
-}
-
+$storeFiles = @(Get-StoreFileLinks -StoreProductId $ProductId -StoreRing $Ring -StoreLang $Lang)
 $items = @()
-foreach ($file in $msixFiles) {
-    $manifest = Read-PackageManifest -MsixPath $file.FullName
-    if ($manifest.Name -ne 'OpenAI.Codex') {
-        Write-Step "Skipping non-Codex package: $($file.Name) identity=$($manifest.Name)"
-        continue
+
+foreach ($storeFile in $storeFiles) {
+    $downloadName = $storeFile.File
+    $downloadPath = Join-Path $downloadDir $downloadName
+    Invoke-CurlDownload -Url $storeFile.Url -OutputPath $downloadPath
+
+    $actualSha1 = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA1).Hash.ToLowerInvariant()
+    if ($actualSha1 -ne $storeFile.Sha1) {
+        throw "SHA1 mismatch for $downloadName. Expected $($storeFile.Sha1), got $actualSha1"
     }
 
-    $ext = $file.Extension
-    $normalizedName = "OpenAI.Codex_$($manifest.Version)_$($manifest.Architecture)__2p2nqsd0c76g0$ext"
-    $dest = Join-Path $assetsDir $normalizedName
-    Copy-Item -LiteralPath $file.FullName -Destination $dest -Force
+    $manifest = Read-PackageManifest -MsixPath $downloadPath
+    if ($manifest.Name -ne 'OpenAI.Codex') {
+        throw "Unexpected package identity in $downloadName`: $($manifest.Name)"
+    }
+    if ($manifest.Architecture -notin @('x64', 'arm64')) {
+        throw "Unexpected package architecture in $downloadName`: $($manifest.Architecture)"
+    }
+    if (-not $manifest.Executable) {
+        throw "Package $downloadName does not declare an application executable."
+    }
 
-    $sha = Get-Sha256 -Path $dest
-    $item = [ordered]@{
+    $normalizedName = "OpenAI.Codex_$($manifest.Version)_$($manifest.Architecture)__2p2nqsd0c76g0.msix"
+    $dest = Join-Path $assetsDir $normalizedName
+    Copy-Item -LiteralPath $downloadPath -Destination $dest -Force
+
+    $items += [pscustomobject][ordered]@{
         file = $normalizedName
-        sha256 = $sha
+        sha256 = Get-Sha256 -Path $dest
+        sha1 = $actualSha1
         size = (Get-Item -LiteralPath $dest).Length
         packageIdentity = $manifest.Name
         packageVersion = $manifest.Version
         architecture = $manifest.Architecture
         publisher = $manifest.Publisher
         displayName = $manifest.DisplayName
-        source = @{
-            method = 'winget download'
-            packageId = $PackageId
-            source = $Source
+        executable = ($manifest.Executable -replace '/', '\')
+        source = [ordered]@{
+            method = 'microsoft-store-cdn'
+            productId = $ProductId
+            ring = $Ring
+            resolver = 'store.rg-adguard.net'
+            storeFile = $storeFile.File
+            storeSha1 = $storeFile.Sha1
+            expiresUtc = $storeFile.Expire
         }
     }
-    $items += [pscustomobject]$item
-}
-
-if ($items.Count -eq 0) {
-    throw 'Downloaded files did not include OpenAI.Codex packages.'
 }
 
 $versions = @($items | Select-Object -ExpandProperty packageVersion -Unique)
@@ -253,7 +183,7 @@ if ($versions.Count -ne 1) {
 }
 
 $releaseVersion = $versions[0]
-$releaseTag = "codex-windows-$releaseVersion"
+$releaseTag = "chatgpt-codex-windows-$releaseVersion"
 
 $checksumsPath = Join-Path $assetsDir 'SHA256SUMS-windows.txt'
 $items |
@@ -262,33 +192,40 @@ $items |
     Set-Content -LiteralPath $checksumsPath -Encoding utf8
 
 $manifestObject = [ordered]@{
-    schema = 1
+    schema = 2
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     releaseTag = $releaseTag
     packageVersion = $releaseVersion
     packageIdentity = 'OpenAI.Codex'
+    productName = 'ChatGPT'
+    productId = $ProductId
     assets = $items
 }
 
 $manifestPath = Join-Path $assetsDir 'release-manifest.json'
 $manifestObject | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
-New-ClientUpdaterPackage -TargetDir $assetsDir
+$assetLines = $items |
+    Sort-Object architecture |
+    ForEach-Object {
+        "- $($_.architecture): ``$($_.file)`` ($([math]::Round($_.size / 1MB, 1)) MB), executable ``$($_.executable)``"
+    } |
+    Out-String
 
 $releaseNotesPath = Join-Path $outFull 'RELEASE_NOTES.md'
 @"
-# Codex Windows Desktop $releaseVersion
+# ChatGPT / Codex Windows Desktop $releaseVersion
 
-This release mirrors the Windows desktop MSIX package for OpenAI Codex.
+This release mirrors the Windows MSIX package for the ChatGPT desktop app that carries the Codex product identity (`OpenAI.Codex`).
+
+The upstream app was rebranded from Codex to ChatGPT in the 26.707 line. The package identity remains `OpenAI.Codex`, while the application entry point may be `app\ChatGPT.exe`.
 
 ## Assets
 
-$($items | Sort-Object architecture | ForEach-Object { "- $($_.architecture): ``$($_.file)`` ($([math]::Round($_.size / 1MB, 1)) MB)" } | Out-String)
-- updater: ``CodexDesktopUpdater.zip``
-
+$assetLines
 ## Verification
 
-Use ``SHA256SUMS-windows.txt`` to verify downloaded files.
+Use `SHA256SUMS-windows.txt` to verify downloaded files.
 
 This repository mirrors installer files and does not modify or patch them.
 "@ | Set-Content -LiteralPath $releaseNotesPath -Encoding utf8
@@ -296,7 +233,7 @@ This repository mirrors installer files and does not modify or patch them.
 $metadataPath = Join-Path $outFull 'release-metadata.json'
 [ordered]@{
     releaseTag = $releaseTag
-    releaseName = "Codex Windows Desktop $releaseVersion"
+    releaseName = "ChatGPT / Codex Windows Desktop $releaseVersion"
     releaseNotes = $releaseNotesPath
     assetsDir = $assetsDir
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $metadataPath -Encoding utf8

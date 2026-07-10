@@ -1,196 +1,109 @@
-# Codex Desktop Mirror Plus
+# ChatGPT / Codex Desktop Mirror Plus
 
-一个面向 Windows 的 **Codex 桌面版安装包镜像 + 安全更新脚本** 项目。
+这个项目镜像 Windows 版 ChatGPT Desktop 中的 Codex 应用包，给无法直接使用 Microsoft Store 的用户提供完整 MSIX 安装包和本地更新脚本。
 
-这个项目的目标很简单：让无法通过 Microsoft Store 正常下载/更新 Codex Desktop 的用户，也能从 GitHub Releases 下载完整 Windows 安装包，并用脚本安全更新自己的本地 Codex。
+2026-07 起，上游把 Codex Desktop 合并进 ChatGPT 品牌：
 
-> 非官方项目。此项目不隶属于 OpenAI 或 Microsoft。镜像安装包前请自行确认相关条款、许可证和合规要求。本项目不会破解、修改或重打包官方安装器。
+- Microsoft Store 页面名称是 `ChatGPT`
+- Windows 包身份仍是 `OpenAI.Codex`
+- 新版入口可执行文件可能是 `app\ChatGPT.exe`
+- 旧版入口可执行文件是 `app\Codex.exe`
 
-## 普通用户怎么用
+本项目以包身份 `OpenAI.Codex` 为准，不再依赖旧的 `Wangnov/codex-app-mirror` fallback。
 
-如果你只是想安装或更新本机的 Codex 桌面版，用下面这个压缩包，不要分别保存 raw 文件：
+> 非官方项目。本项目不隶属于 OpenAI 或 Microsoft，不破解、不修改、不重打包安装器，只镜像官方 Microsoft CDN 下发的 MSIX 文件并发布校验值。
 
-- [下载 CodexDesktopUpdater.zip](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/releases/latest/download/CodexDesktopUpdater.zip)
+## 用户怎么更新
+
+下载 `client/` 里的两个文件，放在同一个文件夹：
+
+- `run-update-codex-desktop.cmd`
+- `update-codex-desktop.ps1`
 
 然后：
 
-1. 如果已经安装过 Codex，先关闭所有 Codex 窗口。
-2. 解压 `CodexDesktopUpdater.zip`。
-3. 双击解压出来的 `run-update-codex-desktop.cmd`。
-4. 如果 Windows 提示“可能有风险”，确认文件来自本仓库后选择“保留”或“仍要运行”。
-5. 如果脚本找不到 Codex，会提示你输入安装目录的绝对路径。
-6. 如果你没有安装过 Codex，就输入一个新的或空的文件夹，例如：
+1. 关闭所有 ChatGPT / Codex 窗口。
+2. 双击 `run-update-codex-desktop.cmd`。
+3. 默认安装目录是 `D:\software\Codex`；如果不在这里，脚本会提示输入绝对路径。
 
-```text
-D:\software\Codex
+脚本会：
+
+- 从本仓库 GitHub Releases 下载最新 Windows MSIX。
+- 自动识别 x64 / arm64。
+- 校验 `SHA256SUMS-windows.txt`。
+- 解包 MSIX 并确认包身份是 `OpenAI.Codex`。
+- 从 `AppxManifest.xml` 读取真实入口，兼容 `ChatGPT.exe` 和 `Codex.exe`。
+- 更新前备份旧安装目录，失败时尝试回滚。
+- 默认更新成功后启动新版应用。
+
+指定其他镜像仓库：
+
+```powershell
+.\client\update-codex-desktop.ps1 -Repo "owner/repo"
 ```
 
-如果默认镜像仓库失效，会提示你输入新的 GitHub 镜像仓库，例如：
+## 维护者怎么同步完整包
 
-```text
-owner/repo
-https://github.com/owner/repo
-```
-
-如果 Codex 安装在 `C:\Program Files` 等受保护目录，脚本会自动请求管理员权限。
-
-首次运行时，脚本会检查必要组件。普通更新主要依赖 Windows 自带的 `curl`、`tar`、`robocopy`；`Git` 只是用于自动读取代理配置。没有 Git 时脚本会询问是否接受通过 `winget` 安装，拒绝也可以继续更新。
-
-脚本默认更新位置是：
-
-```text
-D:\software\Codex
-```
-
-如果你的 Codex 不在这里，脚本会主动询问，不会瞎删目录。
-
-如果目标目录不存在或是空目录，脚本会进入首次安装模式：下载最新版 MSIX、校验 SHA256、解包到该目录，并创建 `运行Codex.bat`。
-
-## 脚本会保护什么
-
-用户端更新脚本会做这些检查：
-
-- 自动识别 x64 / ARM64。
-- 检查必要的 Windows 工具，缺少可选 Git 时询问是否安装。
-- 自动读取 GitHub Release 最新 Windows MSIX。
-- 在默认上游 `Wangnov/codex-app-mirror` 下，优先使用 `codexapp-r2.agentsmirror.com` 下载，失败后再回退到 GitHub Release。
-- 下载后做 SHA256 校验。
-- 解包后确认包名是 `OpenAI.Codex`。
-- 启动器和 PowerShell 脚本会先迁移到系统临时目录运行，避免更新时删除正在运行的脚本。
-- 覆盖前先复制并验证完整备份，再构建 staged 新版本，最后才切换正式安装目录。
-- 没安装过时支持直接安装到新的/空的自定义目录。
-- 成功验证后删除临时文件和备份，不留几 GB 垃圾。
-- 失败时优先回滚旧目录，其次从已验证备份恢复，并保留诊断目录不闪退。
-- 默认只保留根目录 `.bat` / `.cmd` 和 `更新codex脚本` 目录，避免把旧版本残留文件当成自定义文件复制回来。
-- 如确实需要保留安装目录里的其他自定义文件，可以手动使用 `-PreserveExtraInstallFiles`。
-- 不碰用户历史、聊天、配置和工作目录。
-
-不会主动删除这些位置：
-
-```text
-%APPDATA%
-%LOCALAPPDATA%
-%USERPROFILE%\.codex
-Documents\Codex
-```
-
-## 镜像维护者怎么用
-
-这个仓库不仅有用户更新脚本，也包含镜像维护脚本。
-
-目录结构：
-
-```text
-.github/workflows/sync-windows.yml       GitHub Actions 自动同步 Windows 安装包
-scripts/Sync-CodexWindowsMirror.ps1      下载、解包检查、生成 SHA256 和 manifest
-scripts/Publish-GitHubRelease.ps1        发布 GitHub Release
-scripts/Deploy-ToGitHub.ps1              一键创建/推送项目到 GitHub
-client/update-codex-desktop.ps1          普通用户更新脚本
-client/run-update-codex-desktop.cmd      普通用户双击启动器
-docs/operations.md                       运维说明
-```
-
-### 自动镜像
-
-GitHub Actions 会定时运行：
-
-```text
-Sync Windows Codex Desktop Mirror
-```
-
-它会尝试从 Microsoft Store 源下载 Codex Windows MSIX，并发布类似这样的 Release：
-
-如果 GitHub Actions 的 Windows runner 因 Microsoft Store / Entra 授权限制无法直接下载，脚本会自动退回到上游 GitHub 镜像仓库抓取 MSIX，再发布到本仓库。默认 fallback 是：
-
-```text
-Wangnov/codex-app-mirror
-```
-
-```text
-codex-windows-26.623.5546.0
-```
-
-Release 里应该包含：
-
-```text
-OpenAI.Codex_..._x64__....Msix
-OpenAI.Codex_..._arm64__....Msix
-SHA256SUMS-windows.txt
-release-manifest.json
-CodexDesktopUpdater.zip
-```
-
-### 手动镜像
-
-在 Windows 上运行：
+手动生成 release 资产：
 
 ```powershell
 .\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist
 .\scripts\Publish-GitHubRelease.ps1 -DistDir .\dist -Repo "NNNaughtyDog/codex-desktop-mirror-plus"
 ```
 
-如果你想指定自己的上游镜像：
+同步脚本会查询 Microsoft Store 产品 `9PLM9XGG6VKS` 的文件清单，下载：
 
-```powershell
-.\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist -FallbackRepo "owner/repo"
+```text
+OpenAI.Codex_<version>_x64__2p2nqsd0c76g0.msix
+OpenAI.Codex_<version>_arm64__2p2nqsd0c76g0.msix
 ```
 
-如果你只允许 Microsoft Store 官方源，不允许 fallback：
+并生成：
 
-```powershell
-.\scripts\Sync-CodexWindowsMirror.ps1 -OutDir .\dist -NoFallback
+```text
+SHA256SUMS-windows.txt
+release-manifest.json
+RELEASE_NOTES.md
+release-metadata.json
 ```
 
-## 下载地址在哪里
+Release tag 形如：
 
-当前有两类下载：
-
-### 1. 用户更新器
-
-推荐下载一个压缩包：
-
-- [CodexDesktopUpdater.zip](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/releases/latest/download/CodexDesktopUpdater.zip)
-
-备用直链：
-
-- [run-update-codex-desktop.cmd](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/run-update-codex-desktop.cmd)
-- [update-codex-desktop.ps1](https://raw.githubusercontent.com/NNNaughtyDog/codex-desktop-mirror-plus/main/client/update-codex-desktop.ps1)
-
-### 2. Codex Windows 完整安装包
-
-完整安装包会出现在本仓库的 Releases：
-
-- [Releases 页面](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/releases)
-
-如果 Releases 里暂时还没有 `codex-windows-...`，说明自动同步还没有成功跑完。可以到 Actions 页面手动运行同步：
-
-- [Actions 页面](https://github.com/NNNaughtyDog/codex-desktop-mirror-plus/actions)
-
-## 关于下载速度和增量更新
-
-当前 Windows 解包安装方式仍然需要下载完整 MSIX 包。原因是公开 Release 里没有可靠的 Windows 增量补丁链路；脚本不能安全地只下载部分文件再拼装安装目录。
-
-为了改善国内下载体验，用户端脚本会：
-
-- 自动读取 Git / 环境变量里的代理配置；
-- 检测本机 `127.0.0.1:7890` 代理端口；
-- 默认上游为 `Wangnov/codex-app-mirror` 时，优先走 `codexapp-r2.agentsmirror.com`；
-- 只有下载、解包和校验都成功后才替换正式安装目录；
-- 每次运行前清理旧的 updater 工作目录，减少残留。
-
-## 安全说明
-
-- 不建议从来历不明的仓库下载 MSIX。
-- 下载后优先核对 `SHA256SUMS-windows.txt`。
-- 本项目脚本会自动核验 SHA256，不匹配会拒绝安装。
-- 不要在聊天工具、issue、commit 里粘贴 GitHub 密码或 token。
-
-## 一键部署同类项目
-
-如果你 fork 或复制这个项目，可以用：
-
-```powershell
-.\scripts\Deploy-ToGitHub.ps1 -RepoName "codex-desktop-mirror-plus" -Visibility public
+```text
+chatgpt-codex-windows-26.707.3748.0
 ```
 
-它会使用 GitHub CLI/本机登录状态完成部署。
+## GitHub Actions
+
+工作流：
+
+```text
+Sync ChatGPT Codex Windows Mirror
+```
+
+默认每 6 小时运行一次，也可以在 Actions 页面手动触发。工作流需要仓库开启 release 写权限：
+
+```text
+Settings -> Actions -> General -> Workflow permissions -> Read and write permissions
+```
+
+## 安全校验
+
+下载后可手动校验：
+
+```powershell
+Get-FileHash .\OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0.msix -Algorithm SHA256
+```
+
+和 release 里的 `SHA256SUMS-windows.txt` 对比。
+
+## 已废弃的旧方案
+
+这些路径已经不再作为默认方案：
+
+- `winget download`
+- `Wangnov/codex-app-mirror` fallback
+- `https://codexapp-r2.agentsmirror.com/latest/win-x64`
+- 固定假设入口是 `app\Codex.exe`
+
+原因是上游已经改名为 ChatGPT，旧镜像管道在 26.623 后停止同步 Windows 新包。
